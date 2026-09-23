@@ -118,6 +118,14 @@ export default function App() {
     }
   };
 
+  const handleGraphSelect = (id: string) => {
+    if (selectedId === id) {
+      setRightOpen(true);
+    } else {
+      setSelectedId(id);
+    }
+  };
+
   return (
     <main
       className={`app-shell ${
@@ -144,7 +152,7 @@ export default function App() {
         records={data.records}
         relationships={data.relationships}
         selectedId={selectedId}
-        onSelect={setSelectedId}
+        onSelect={handleGraphSelect}
         onClear={() => setSelectedId(undefined)}
       />
 
