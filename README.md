@@ -1,6 +1,6 @@
 # Red de contactos — prototipo
 
-Prototipo local de una herramienta para gestionar personas, organizaciones, proyectos y visualizar sus vínculos en una red interactiva.
+Prototipo local de una herramienta para gestionar personas, organizaciones, instituciones y visualizar sus vínculos en una red interactiva.
 
 ## Requisitos
 - Node.js 18 o superior
@@ -26,7 +26,7 @@ No usa backend ni servicios externos. Los registros y relaciones se guardan en `
 En la parte inferior de la barra izquierda elegí **Restablecer demo** y confirmá. Se eliminan los cambios locales y se restauran los registros y relaciones de ejemplo.
 
 ## Funcionalidades
-- Personas, organizaciones y proyectos.
+- Personas, organizaciones e instituciones.
 - Alta, edición y eliminación de registros.
 - Alta y eliminación de relaciones.
 - Prevención de autorrelaciones y relaciones idénticas duplicadas.

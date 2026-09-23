@@ -74,7 +74,7 @@ export default function NetworkGraph({records,relationships,selectedId,onSelect,
         <g className="network-nodes">{records.map(r=>{const p=pos.get(r.id)!;const selected=!intro&&r.id===selectedId;const neighbor=!intro&&related.has(r.id);const dim=!intro&&!!selectedId&&!selected&&!neighbor;const hovered=!intro&&r.id===hoveredId;return <g key={r.id} className={`node ${r.type} ${selected?'selected':''} ${neighbor?'neighbor':''} ${hovered?'hovered':''} ${dim?'dim':''} ${intro?'intro-node':''}`} transform={`translate(${p.x},${p.y})`} role="button" tabIndex={intro?-1:0} aria-label={`${r.name}, ${r.type}`} onMouseEnter={()=>!intro&&setHoveredId(r.id)} onMouseLeave={()=>setHoveredId(undefined)} onFocus={()=>!intro&&setHoveredId(r.id)} onBlur={()=>setHoveredId(undefined)} onClick={()=>!intro&&onSelect(r.id)} onKeyDown={e=>!intro&&(e.key==='Enter'||e.key===' ')&&onSelect(r.id)}><circle className="node-halo" r={selected?27:hovered?25:intro?13:18}/><circle className="node-core" r={selected?8:hovered?7:neighbor?5.5:intro?4:4.5}/>{!intro&&<text className="node-name" y={selected||hovered?46:33}>{hovered?r.name:short(r.name)}</text>}</g>})}</g>
       </svg>
       {!intro&&<div className="graph-hint">Hacé click en un nodo para explorar sus conexiones</div>}
-      {!intro&&<div className="legend"><span><i className="dot person"/>Persona</span><span><i className="dot organization"/>Organización</span><span><i className="dot project"/>Proyecto</span></div>}
+      {!intro&&<div className="legend"><span><i className="dot person"/>Persona</span><span><i className="dot company"/>Empresa</span><span><i className="dot institution"/>Institución</span></div>}
     </div>
   </section>;
 }
