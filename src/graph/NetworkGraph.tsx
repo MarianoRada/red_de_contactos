@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import type { MouseEvent, PointerEvent, WheelEvent } from 'react';
 import {
   Info,
@@ -10,16 +10,27 @@ import {
 
 import type { ContactRecord, Relationship } from '../types/models';
 
-import { getOtherId, getRelationsFor } from '../lib/relations';
 import {
   loadNodePositions,
   saveNodePositions,
 } from '../lib/storage';
 import InfoModal from '../components/InfoModal';
+import { SpatialHash } from './spatialHash';
+import {
+  repairLayout,
+  validateLayout,
+} from './layoutValidation';
 
 type P = {
   x: number;
   y: number;
+};
+
+type Bounds = {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
 };
 
 type DragState = {
@@ -29,6 +40,7 @@ type DragState = {
   startX: number;
   startY: number;
   moved: boolean;
+  position?: P;
 };
 
 type ViewBox = {
@@ -43,8 +55,9 @@ type ZoomDirection = 'in' | 'out';
 
 const INTRO_MS = 6200;
 
-const VIEW_WIDTH = 1600;
-const VIEW_HEIGHT = 1000;
+/* Área lógica moderada para que 400–600 nodos grandes entren sin colisiones. */
+const VIEW_WIDTH = 2000;
+const VIEW_HEIGHT = 1250;
 
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 4;
@@ -56,12 +69,41 @@ const CY = VIEW_HEIGHT / 2;
  * Separación mínima entre nodos.
  * Si querés más aire después, podés subirlo a 68 o 70.
  */
-const MIN_NODE_DISTANCE = 62;
+const NODE_GAP = 8;
+const SPATIAL_CELL_SIZE = 96;
+const MAX_LAYOUT_RADIUS = 34;
 
 /*
  * Cantidad de brazos de la galaxia.
  */
-const GALAXY_ARMS = 3;
+const GALAXY_ARMS = 5;
+
+let performanceMeasureId = 0;
+
+function measureDev<T>(
+  name: string,
+  detail: Record<string, number>,
+  callback: () => T
+) {
+  if (!import.meta.env.DEV) {
+    return callback();
+  }
+
+  const started = performance.now();
+  const result = callback();
+
+  try {
+    performance.measure(name, {
+      start: started,
+      end: performance.now(),
+      detail,
+    });
+  } catch {
+    /* Las métricas de desarrollo nunca deben afectar el render. */
+  }
+
+  return result;
+}
 
 const hash = (s: string) =>
   [...s].reduce(
@@ -74,12 +116,142 @@ const hash = (s: string) =>
  * POSICIONES
  * ============================================================
  */
-function positions(
+export function positions(
   records: ContactRecord[],
   rels: Relationship[],
   selected?: string
 ) {
   const map = new Map<string, P>();
+  const spatialHash = new SpatialHash(SPATIAL_CELL_SIZE);
+
+  const neighborsByNode = new Map<string, Set<string>>();
+
+  rels.forEach((rel) => {
+    const sourceNeighbors =
+      neighborsByNode.get(rel.sourceId) ?? new Set<string>();
+    const targetNeighbors =
+      neighborsByNode.get(rel.targetId) ?? new Set<string>();
+
+    sourceNeighbors.add(rel.targetId);
+    targetNeighbors.add(rel.sourceId);
+    neighborsByNode.set(rel.sourceId, sourceNeighbors);
+    neighborsByNode.set(rel.targetId, targetNeighbors);
+  });
+
+  const radiusFor = (id: string) =>
+    nodeSizes(neighborsByNode.get(id)?.size ?? 0).halo;
+
+  const registerPosition = (id: string, point: P) => {
+    map.set(id, point);
+    spatialHash.insert(id, point, radiusFor(id));
+  };
+
+  const placeWithoutOverlap = (
+    id: string,
+    start: P,
+    bounds: Bounds
+  ): P => {
+    const candidateIsAvailable = (candidate: P) => {
+      const nearby = spatialHash.nearby(
+        candidate,
+        radiusFor(id) + MAX_LAYOUT_RADIUS + NODE_GAP
+      );
+
+      return nearby.every((existing) => {
+        const dx = candidate.x - existing.point.x;
+        const dy = candidate.y - existing.point.y;
+        const requiredDistance =
+          radiusFor(id) +
+          existing.radius +
+          NODE_GAP;
+
+        return Math.hypot(dx, dy) >= requiredDistance;
+      });
+    };
+
+    const initial = {
+      x: Math.max(bounds.minX, Math.min(bounds.maxX, start.x)),
+      y: Math.max(bounds.minY, Math.min(bounds.maxY, start.y)),
+    };
+
+    if (candidateIsAvailable(initial)) {
+      return initial;
+    }
+
+    /*
+     * Golden-angle sampling conserva el punto original como primera opción
+     * y luego explora posiciones cercanas de forma irregular. A diferencia de
+     * empujar el nodo repetidamente, no queda atrapado contra otro nodo o un
+     * borde cuando la zona inicial está muy cargada.
+     */
+    const baseAngle =
+      (Math.abs(hash(id)) % 360) * (Math.PI / 180);
+    const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+
+    for (let attempt = 1; attempt <= 6000; attempt++) {
+      const distance = 7 * Math.sqrt(attempt);
+      const angle = baseAngle + attempt * goldenAngle;
+      const candidate = {
+        x: start.x + Math.cos(angle) * distance,
+        y: start.y + Math.sin(angle) * distance * 0.78,
+      };
+
+      if (
+        candidate.x < bounds.minX ||
+        candidate.x > bounds.maxX ||
+        candidate.y < bounds.minY ||
+        candidate.y > bounds.maxY
+      ) {
+        continue;
+      }
+
+      if (candidateIsAvailable(candidate)) {
+        return candidate;
+      }
+    }
+
+    /*
+     * Este es solo el primer intento local. El layout completo se repara y
+     * valida después con repairLayout(), que también busca en todo el área.
+     */
+    return initial;
+  };
+
+  const finalizeLayout = () => {
+    const radii = new Map(
+      [...map.keys()].map((id) => [id, radiusFor(id)])
+    );
+    const repaired = repairLayout(
+      map,
+      radii,
+      {
+        minX: MAX_LAYOUT_RADIUS + NODE_GAP,
+        maxX: VIEW_WIDTH - MAX_LAYOUT_RADIUS - NODE_GAP,
+        minY: MAX_LAYOUT_RADIUS + NODE_GAP,
+        maxY: VIEW_HEIGHT - MAX_LAYOUT_RADIUS - NODE_GAP,
+      },
+      NODE_GAP
+    );
+    const validation = validateLayout(
+      repaired,
+      radii,
+      {
+        minX: 0,
+        maxX: VIEW_WIDTH,
+        minY: 0,
+        maxY: VIEW_HEIGHT,
+      },
+      NODE_GAP
+    );
+
+    if (!validation.valid) {
+      throw new Error(
+        `Layout inválido: ${validation.collisions.length} colisiones y ${validation.outOfBounds.length} nodos fuera del viewport.`
+      );
+    }
+
+    return repaired;
+  };
 
   /*
    * ============================================================
@@ -87,27 +259,27 @@ function positions(
    * ============================================================
    */
   if (selected) {
-    map.set(selected, {
+    registerPosition(selected, {
       x: CX,
       y: CY,
     });
 
     const neighbors = [
-      ...new Set(
-        getRelationsFor(selected, rels).map((rel) =>
-          getOtherId(rel, selected)
-        )
-      ),
+      ...(neighborsByNode.get(selected) ?? []),
     ];
 
     /*
      * Vecinos directos alrededor del nodo seleccionado.
      */
-    const neighborRadiusX =
-      neighbors.length > 12 ? 330 : 270;
+    const neighborRadiusX = Math.min(
+      460,
+      Math.max(270, neighbors.length * 28)
+    );
 
-    const neighborRadiusY =
-      neighbors.length > 12 ? 250 : 205;
+    const neighborRadiusY = Math.min(
+      330,
+      Math.max(205, neighbors.length * 20)
+    );
 
     neighbors.forEach((id, i) => {
       const angle =
@@ -118,17 +290,28 @@ function positions(
       const wobble =
         (Math.abs(hash(id)) % 30) - 15;
 
-      map.set(id, {
-        x:
-          CX +
-          Math.cos(angle) *
-            (neighborRadiusX + wobble),
-
-        y:
-          CY +
-          Math.sin(angle) *
-            (neighborRadiusY + wobble * 0.5),
-      });
+      registerPosition(
+        id,
+        placeWithoutOverlap(
+          id,
+          {
+            x:
+              CX +
+              Math.cos(angle) *
+                (neighborRadiusX + wobble),
+            y:
+              CY +
+              Math.sin(angle) *
+                (neighborRadiusY + wobble * 0.5),
+          },
+          {
+            minX: 90,
+            maxX: VIEW_WIDTH - 90,
+            minY: 110,
+            maxY: VIEW_HEIGHT - 110,
+          }
+        )
+      );
     });
 
     /*
@@ -192,13 +375,22 @@ function positions(
         Math.min(VIEW_HEIGHT - 150, y)
       );
 
-      map.set(record.id, {
-        x,
-        y,
-      });
+      registerPosition(
+        record.id,
+        placeWithoutOverlap(
+          record.id,
+          { x, y },
+          {
+            minX: 110,
+            maxX: VIEW_WIDTH - 110,
+            minY: 150,
+            maxY: VIEW_HEIGHT - 150,
+          }
+        )
+      );
     });
 
-    return map;
+    return finalizeLayout();
   }
 
   /*
@@ -233,8 +425,8 @@ function positions(
    * Es más ancha que alta porque la pantalla
    * tiene formato horizontal.
    */
-  const maxRadiusX = 650;
-  const maxRadiusY = 325;
+  const maxRadiusX = (rightLimit - leftLimit) * 0.46;
+  const maxRadiusY = (bottomLimit - topLimit) * 0.46;
 
   /*
    * Separamos los registros en brazos.
@@ -337,8 +529,8 @@ function positions(
      * y no tres líneas espirales.
      */
     const spread =
-      18 +
-      progress * 35;
+      20 +
+      progress * 48;
 
     const spreadX =
       (((h >> 2) % 101) - 50) /
@@ -411,15 +603,22 @@ function positions(
      */
     let attempts = 0;
 
-    while (attempts < 50) {
+    while (attempts < 220) {
       let collision = false;
+      let collisionAngle = angle;
+      let collisionDistance = 0;
 
-      for (const existing of map.values()) {
+      const nearby = spatialHash.nearby(
+        { x, y },
+        radiusFor(record.id) + MAX_LAYOUT_RADIUS + NODE_GAP
+      );
+
+      for (const existing of nearby) {
         const dx =
-          x - existing.x;
+          x - existing.point.x;
 
         const dy =
-          y - existing.y;
+          y - existing.point.y;
 
         const distance =
           Math.sqrt(
@@ -427,11 +626,19 @@ function positions(
             dy * dy
           );
 
-        if (
-          distance <
-          MIN_NODE_DISTANCE
-        ) {
+        const requiredDistance =
+          radiusFor(record.id) +
+          existing.radius +
+          NODE_GAP;
+
+        if (distance < requiredDistance) {
           collision = true;
+          collisionAngle =
+            distance > 0.001
+              ? Math.atan2(dy, dx)
+              : angle;
+          collisionDistance =
+            requiredDistance - distance + 1;
           break;
         }
       }
@@ -448,13 +655,10 @@ function positions(
        * Buscamos otra posición alrededor
        * siguiendo una mini espiral.
        */
-      const correctionAngle =
-        angle +
-        attempts * 0.82;
+      const correctionAngle = collisionAngle;
 
       const correctionDistance =
-        12 +
-        attempts * 3.7;
+        collisionDistance;
 
       x +=
         Math.cos(
@@ -490,13 +694,22 @@ function positions(
       attempts++;
     }
 
-    map.set(record.id, {
-      x,
-      y,
-    });
+    registerPosition(
+      record.id,
+      placeWithoutOverlap(
+        record.id,
+        { x, y },
+        {
+          minX: leftLimit,
+          maxX: rightLimit,
+          minY: topLimit,
+          maxY: bottomLimit,
+        }
+      )
+    );
   });
 
-  return map;
+  return finalizeLayout();
 }
 
 /*
@@ -640,12 +853,115 @@ function labelPoint(
  * El límite evita que un nodo muy vinculado tape toda la red,
  * pero cada vínculo sigue aumentando su tamaño hasta alcanzarlo.
  */
+type GraphEdgeProps = {
+  rel: Relationship;
+  a: P;
+  b: P;
+  active: boolean;
+  muted: boolean;
+  labelPosition?: P;
+  labelWidth: number;
+  edgeRef: (element: SVGLineElement | null) => void;
+};
+
+const GraphEdge = memo(function GraphEdge({
+  rel,
+  a,
+  b,
+  active,
+  muted,
+  labelPosition,
+  labelWidth,
+  edgeRef,
+}: GraphEdgeProps) {
+  return (
+    <g
+      className={`edge ${active ? 'active' : ''} ${muted ? 'muted' : ''}`}
+    >
+      <line
+        ref={edgeRef}
+        x1={a.x}
+        y1={a.y}
+        x2={b.x}
+        y2={b.y}
+      />
+
+      {active && labelPosition && (
+        <g
+          className="edge-label"
+          transform={`translate(${labelPosition.x},${labelPosition.y})`}
+        >
+          <rect
+            x={-labelWidth / 2}
+            y="-14"
+            width={labelWidth}
+            height="28"
+            rx="14"
+          />
+
+          <text x="0" y="4">
+            {rel.type}
+          </text>
+        </g>
+      )}
+    </g>
+  );
+});
+
 function nodeSizes(connectionCount: number) {
   return {
     halo: Math.min(13 + connectionCount * 3, 34),
     core: Math.min(3.5 + connectionCount, 10),
   };
 }
+
+type RelationIndex = {
+  neighborsByNode: Map<string, Set<string>>;
+  connectionCounts: Map<string, number>;
+  relationshipsByNode: Map<string, Relationship[]>;
+};
+
+function buildRelationIndex(
+  relationships: Relationship[]
+): RelationIndex {
+  const neighborsByNode = new Map<string, Set<string>>();
+  const relationshipsByNode = new Map<string, Relationship[]>();
+
+  relationships.forEach((rel) => {
+    const sourceNeighbors =
+      neighborsByNode.get(rel.sourceId) ?? new Set<string>();
+    const targetNeighbors =
+      neighborsByNode.get(rel.targetId) ?? new Set<string>();
+
+    sourceNeighbors.add(rel.targetId);
+    targetNeighbors.add(rel.sourceId);
+    neighborsByNode.set(rel.sourceId, sourceNeighbors);
+    neighborsByNode.set(rel.targetId, targetNeighbors);
+
+    const sourceRelations =
+      relationshipsByNode.get(rel.sourceId) ?? [];
+    const targetRelations =
+      relationshipsByNode.get(rel.targetId) ?? [];
+
+    sourceRelations.push(rel);
+    targetRelations.push(rel);
+    relationshipsByNode.set(rel.sourceId, sourceRelations);
+    relationshipsByNode.set(rel.targetId, targetRelations);
+  });
+
+  return {
+    neighborsByNode,
+    relationshipsByNode,
+    connectionCounts: new Map(
+      [...neighborsByNode].map(([id, neighbors]) => [
+        id,
+        neighbors.size,
+      ])
+    ),
+  };
+}
+
+const EMPTY_NEIGHBORS = new Set<string>();
 
 /*
  * ============================================================
@@ -665,18 +981,52 @@ type NetworkGraphProps = {
  * COMPONENTE
  * ============================================================
  */
-export default function NetworkGraph({
+function NetworkGraph({
   records,
   relationships,
   selectedId,
   onSelect,
   onClear,
 }: NetworkGraphProps) {
-  const [
-    hoveredId,
-    setHoveredId,
-  ] =
-    useState<string>();
+  const renderMeasureId = import.meta.env.DEV
+    ? `${++performanceMeasureId}`
+    : undefined;
+
+  if (renderMeasureId) {
+    try {
+      performance.mark(`red-contactos:render-start-${renderMeasureId}`);
+    } catch {
+      /* Las métricas de desarrollo nunca deben afectar el render. */
+    }
+  }
+
+  useEffect(() => {
+    if (!renderMeasureId) {
+      return;
+    }
+
+    try {
+      const endMark = `red-contactos:render-end-${renderMeasureId}`;
+
+      performance.mark(endMark);
+      performance.measure('red-contactos:graph-render', {
+        start: `red-contactos:render-start-${renderMeasureId}`,
+        end: endMark,
+        detail: {
+          nodes: records.length,
+          edges: relationships.length,
+        },
+      });
+      performance.clearMarks(
+        `red-contactos:render-start-${renderMeasureId}`
+      );
+      performance.clearMarks(endMark);
+    } catch {
+      /* Las métricas de desarrollo nunca deben afectar el render. */
+    }
+  }, [renderMeasureId, records.length, relationships.length]);
+
+  const hoveredIdRef = useRef<string>();
 
   const [
     intro,
@@ -686,8 +1036,8 @@ export default function NetworkGraph({
 
   const svgRef = useRef<SVGSVGElement>(null);
   const dragRef = useRef<DragState>();
+  const dragSpatialHashRef = useRef<SpatialHash>();
   const suppressClickRef = useRef(false);
-  const [draggingId, setDraggingId] = useState<string>();
   const [customPositionsByView, setCustomPositionsByView] = useState<
     Map<string, Map<string, P>>
   >(() => loadNodePositions());
@@ -695,7 +1045,7 @@ export default function NetworkGraph({
   const [zoomDirection, setZoomDirection] =
     useState<ZoomDirection>('in');
   const [infoOpen, setInfoOpen] = useState(false);
-  const [viewBox, setViewBox] = useState<ViewBox>({
+  const viewBoxRef = useRef<ViewBox>({
     x: 0,
     y: 0,
     width: VIEW_WIDTH,
@@ -703,7 +1053,8 @@ export default function NetworkGraph({
     scale: 1,
   });
 
-  const layoutKey = selectedId || 'all';
+  /* La selección solo cambia estilos; no crea un layout nuevo. */
+  const layoutKey = 'all';
 
   /*
    * Posiciones finales.
@@ -711,18 +1062,21 @@ export default function NetworkGraph({
   const finalPos =
     useMemo(
       () =>
-        positions(
-          records,
-          relationships,
-          intro
-            ? undefined
-            : selectedId
+        measureDev(
+          'red-contactos:layout',
+          {
+            nodes: records.length,
+            edges: relationships.length,
+          },
+          () =>
+            positions(
+              records,
+              relationships
+            )
         ),
       [
         records,
         relationships,
-        selectedId,
-        intro,
       ]
     );
 
@@ -738,29 +1092,119 @@ export default function NetworkGraph({
       [records]
     );
 
-  const [
-    animatedPos,
-    setAnimatedPos,
-  ] =
-    useState<
-      Map<string, P>
-    >(startPos);
+  const relationIndex = useMemo(
+    () => buildRelationIndex(relationships),
+    [relationships]
+  );
 
   const frame =
     useRef<number>();
+  const nodeRefs = useRef<Map<string, SVGGElement>>(new Map());
+  const edgeRefs = useRef<Map<string, SVGLineElement>>(new Map());
+  const nodeRefCallbacks = useRef<
+    Map<string, (element: SVGGElement | null) => void>
+  >(new Map());
+  const edgeRefCallbacks = useRef<
+    Map<string, (element: SVGLineElement | null) => void>
+  >(new Map());
+
+  const getNodeRef = (id: string) => {
+    const existing = nodeRefCallbacks.current.get(id);
+
+    if (existing) {
+      return existing;
+    }
+
+    const callback = (element: SVGGElement | null) => {
+      if (element) {
+        nodeRefs.current.set(id, element);
+      } else {
+        nodeRefs.current.delete(id);
+      }
+    };
+
+    nodeRefCallbacks.current.set(id, callback);
+    return callback;
+  };
+
+  const getEdgeRef = (id: string) => {
+    const existing = edgeRefCallbacks.current.get(id);
+
+    if (existing) {
+      return existing;
+    }
+
+    const callback = (element: SVGLineElement | null) => {
+      if (element) {
+        edgeRefs.current.set(id, element);
+      } else {
+        edgeRefs.current.delete(id);
+      }
+    };
+
+    edgeRefCallbacks.current.set(id, callback);
+    return callback;
+  };
 
   const renderedPos = useMemo(() => {
     const next = new Map(finalPos);
     const customPositions = customPositionsByView.get(layoutKey);
+    const priorityIds = new Set<string>();
 
     customPositions?.forEach((point, id) => {
       if (next.has(id)) {
         next.set(id, point);
+        priorityIds.add(id);
       }
     });
 
-    return next;
-  }, [customPositionsByView, finalPos, layoutKey]);
+    const radii = new Map(
+      [...next.keys()].map((id) => [
+        id,
+        nodeSizes(
+          relationIndex.connectionCounts.get(id) ?? 0
+        ).halo,
+      ])
+    );
+
+    const repaired = repairLayout(
+      next,
+      radii,
+      {
+        minX: MAX_LAYOUT_RADIUS + NODE_GAP,
+        maxX: VIEW_WIDTH - MAX_LAYOUT_RADIUS - NODE_GAP,
+        minY: MAX_LAYOUT_RADIUS + NODE_GAP,
+        maxY: VIEW_HEIGHT - MAX_LAYOUT_RADIUS - NODE_GAP,
+      },
+      NODE_GAP,
+      priorityIds
+    );
+
+    const validation = validateLayout(
+      repaired,
+      radii,
+      {
+        minX: 0,
+        maxX: VIEW_WIDTH,
+        minY: 0,
+        maxY: VIEW_HEIGHT,
+      },
+      NODE_GAP
+    );
+
+    if (!validation.valid) {
+      throw new Error(
+        `Layout manual inválido: ${validation.collisions.length} colisiones y ${validation.outOfBounds.length} nodos fuera del viewport.`
+      );
+    }
+
+    return repaired;
+  }, [
+    customPositionsByView,
+    finalPos,
+    layoutKey,
+    relationIndex,
+  ]);
 
   useEffect(() => {
     saveNodePositions(customPositionsByView);
@@ -772,14 +1216,6 @@ export default function NetworkGraph({
    * ============================================================
    */
   useEffect(() => {
-    if (!intro) {
-      setAnimatedPos(
-        renderedPos
-      );
-
-      return;
-    }
-
     const started =
       performance.now();
 
@@ -800,12 +1236,6 @@ export default function NetworkGraph({
           1 - raw,
           4
         );
-
-      const next =
-        new Map<
-          string,
-          P
-        >();
 
       records.forEach(
         (
@@ -858,29 +1288,23 @@ export default function NetworkGraph({
               (h % 42)) *
             energy;
 
-          next.set(
-            record.id,
-            {
-              x:
-                from.x +
-                (to.x -
-                  from.x) *
-                  eased +
-                orbitX,
+          const x =
+            from.x +
+            (to.x - from.x) *
+              eased +
+            orbitX;
+          const y =
+            from.y +
+            (to.y - from.y) *
+              eased +
+            orbitY;
+          const element = nodeRefs.current.get(record.id);
 
-              y:
-                from.y +
-                (to.y -
-                  from.y) *
-                  eased +
-                orbitY,
-            }
+          element?.setAttribute(
+            'transform',
+            `translate(${x},${y})`
           );
         }
-      );
-
-      setAnimatedPos(
-        next
       );
 
       if (raw < 1) {
@@ -889,9 +1313,17 @@ export default function NetworkGraph({
             tick
           );
       } else {
-        setAnimatedPos(
-          renderedPos
-        );
+        records.forEach((record) => {
+          const point = renderedPos.get(record.id);
+          const element = nodeRefs.current.get(record.id);
+
+          if (point) {
+            element?.setAttribute(
+              'transform',
+              `translate(${point.x},${point.y})`
+            );
+          }
+        });
 
         setIntro(false);
       }
@@ -915,24 +1347,157 @@ export default function NetworkGraph({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /*
-   * Actualizar posiciones al seleccionar.
-   */
-  useEffect(() => {
-    if (!intro) {
-      setAnimatedPos(
-        renderedPos
-      );
-    }
-  }, [
-    intro,
-    renderedPos,
-  ]);
-
   const pos =
     intro
-      ? animatedPos
+      ? startPos
       : renderedPos;
+
+  const setHoverNodeVisual = (id: string, active: boolean) => {
+    const node = nodeRefs.current.get(id);
+
+    if (!node) {
+      return;
+    }
+
+    node.classList.toggle('hovered', active);
+
+    const selected = node.classList.contains('selected');
+    const introNode = node.classList.contains('intro-node');
+    const sizes = nodeSizes(
+      relationIndex.connectionCounts.get(id) ?? 0
+    );
+    const halo = node.querySelector<SVGCircleElement>('.node-halo');
+    const core = node.querySelector<SVGCircleElement>('.node-core');
+
+    halo?.setAttribute(
+      'r',
+      `${active ? Math.max(25, sizes.halo) : selected ? 27 : introNode ? 13 : sizes.halo}`
+    );
+    core?.setAttribute(
+      'r',
+      `${active ? Math.max(7, sizes.core) : selected ? 8 : introNode ? 4 : sizes.core}`
+    );
+  };
+
+  const setHoverEdgeVisual = (rel: Relationship, active: boolean) => {
+    edgeRefs.current
+      .get(rel.id)
+      ?.parentElement
+      ?.classList.toggle('hover-active', active);
+  };
+
+  const applyHoverVisuals = (id: string, active: boolean) => {
+    setHoverNodeVisual(id, active);
+
+    relationIndex.neighborsByNode
+      .get(id)
+      ?.forEach((neighborId) =>
+        nodeRefs.current
+          .get(neighborId)
+          ?.classList.toggle('hover-neighbor', active)
+      );
+
+    relationIndex.relationshipsByNode
+      .get(id)
+      ?.forEach((rel) => setHoverEdgeVisual(rel, active));
+  };
+
+  const setHoveredNode = (nextId?: string) => {
+    const previousId = hoveredIdRef.current;
+
+    if (previousId === nextId) {
+      return;
+    }
+
+    measureDev(
+      'red-contactos:hover',
+      {
+        nodes: nextId ? 1 : previousId ? 1 : 0,
+        edges: nextId
+          ? relationIndex.relationshipsByNode.get(nextId)?.length ?? 0
+          : previousId
+            ? relationIndex.relationshipsByNode.get(previousId)?.length ?? 0
+            : 0,
+      },
+      () => {
+        if (previousId) {
+          applyHoverVisuals(previousId, false);
+        }
+
+        hoveredIdRef.current = nextId;
+
+        if (nextId) {
+          applyHoverVisuals(nextId, true);
+        }
+      }
+    );
+  };
+
+  useEffect(() => {
+    const currentId = hoveredIdRef.current;
+
+    if (currentId) {
+      applyHoverVisuals(currentId, true);
+    }
+  });
+
+  const resolveDraggedPoint = (id: string, start: P): P => {
+    const occupied = dragSpatialHashRef.current;
+    const radius = nodeSizes(
+      relationIndex.connectionCounts.get(id) ?? 0
+    ).halo;
+    const maxRadius = MAX_LAYOUT_RADIUS;
+    const bounds = {
+      minX: maxRadius + NODE_GAP,
+      maxX: VIEW_WIDTH - maxRadius - NODE_GAP,
+      minY: maxRadius + NODE_GAP,
+      maxY: VIEW_HEIGHT - maxRadius - NODE_GAP,
+    };
+    const candidateIsAvailable = (candidate: P) =>
+      occupied
+        ?.nearby(candidate, radius + maxRadius + NODE_GAP)
+        .every((entry) =>
+          Math.hypot(
+            candidate.x - entry.point.x,
+            candidate.y - entry.point.y
+          ) >= radius + entry.radius + NODE_GAP
+        ) ?? true;
+    const initial = {
+      x: Math.max(bounds.minX, Math.min(bounds.maxX, start.x)),
+      y: Math.max(bounds.minY, Math.min(bounds.maxY, start.y)),
+    };
+
+    if (candidateIsAvailable(initial)) {
+      return initial;
+    }
+
+    const baseAngle =
+      (Math.abs(hash(id)) % 360) * (Math.PI / 180);
+    const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+
+    for (let attempt = 1; attempt <= 12000; attempt++) {
+      const distance = 7 * Math.sqrt(attempt);
+      const angle = baseAngle + attempt * goldenAngle;
+      const candidate = {
+        x: start.x + Math.cos(angle) * distance,
+        y: start.y + Math.sin(angle) * distance * 0.78,
+      };
+
+      if (
+        candidate.x >= bounds.minX &&
+        candidate.x <= bounds.maxX &&
+        candidate.y >= bounds.minY &&
+        candidate.y <= bounds.maxY &&
+        candidateIsAvailable(candidate)
+      ) {
+        return candidate;
+      }
+    }
+
+    throw new Error(
+      `No hay espacio suficiente para mover el nodo ${id} sin colisiones.`
+    );
+  };
 
   const screenToGraphPoint = (
     clientX: number,
@@ -970,36 +1535,36 @@ export default function NetworkGraph({
       return;
     }
 
-    setViewBox((current) => {
-      const nextScale = Math.max(
-        MIN_ZOOM,
-        Math.min(MAX_ZOOM, current.scale * factor)
-      );
-      const nextWidth = VIEW_WIDTH / nextScale;
-      const nextHeight = VIEW_HEIGHT / nextScale;
-      const relativeX =
-        (point.x - current.x) / current.width;
-      const relativeY =
-        (point.y - current.y) / current.height;
-      const nextX =
-        point.x - relativeX * nextWidth;
-      const nextY =
-        point.y - relativeY * nextHeight;
+    const current = viewBoxRef.current;
+    const nextScale = Math.max(
+      MIN_ZOOM,
+      Math.min(MAX_ZOOM, current.scale * factor)
+    );
+    const nextWidth = VIEW_WIDTH / nextScale;
+    const nextHeight = VIEW_HEIGHT / nextScale;
+    const relativeX =
+      (point.x - current.x) / current.width;
+    const relativeY =
+      (point.y - current.y) / current.height;
+    const next = {
+      scale: nextScale,
+      width: nextWidth,
+      height: nextHeight,
+      x: Math.max(
+        0,
+        Math.min(VIEW_WIDTH - nextWidth, point.x - relativeX * nextWidth)
+      ),
+      y: Math.max(
+        0,
+        Math.min(VIEW_HEIGHT - nextHeight, point.y - relativeY * nextHeight)
+      ),
+    };
 
-      return {
-        scale: nextScale,
-        width: nextWidth,
-        height: nextHeight,
-        x: Math.max(
-          0,
-          Math.min(VIEW_WIDTH - nextWidth, nextX)
-        ),
-        y: Math.max(
-          0,
-          Math.min(VIEW_HEIGHT - nextHeight, nextY)
-        ),
-      };
-    });
+    viewBoxRef.current = next;
+    svgRef.current?.setAttribute(
+      'viewBox',
+      `${next.x} ${next.y} ${next.width} ${next.height}`
+    );
   };
 
   const handleWheel = (event: WheelEvent<SVGSVGElement>) => {
@@ -1068,6 +1633,22 @@ export default function NetworkGraph({
     event.preventDefault();
     event.stopPropagation();
     suppressClickRef.current = false;
+    const dragSpatialHash = new SpatialHash(SPATIAL_CELL_SIZE);
+
+    pos.forEach((otherPoint, otherId) => {
+      if (otherId !== id) {
+        dragSpatialHash.insert(
+          otherId,
+          otherPoint,
+          nodeSizes(
+            relationIndex.connectionCounts.get(otherId) ?? 0
+          ).halo
+        );
+      }
+    });
+
+    dragSpatialHashRef.current = dragSpatialHash;
+    nodeRefs.current.get(id)?.classList.add('dragging');
     dragRef.current = {
       id,
       offsetX: nodePosition.x - point.x,
@@ -1076,8 +1657,30 @@ export default function NetworkGraph({
       startY: point.y,
       moved: false,
     };
-    setDraggingId(id);
     event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const commitCustomPosition = (id: string, point: P) => {
+    setCustomPositionsByView((previous) => {
+      const next = new Map(previous);
+      const viewPositions = new Map(
+        next.get(layoutKey) ?? []
+      );
+
+      viewPositions.set(id, point);
+      next.set(layoutKey, viewPositions);
+
+      if (layoutKey !== 'all') {
+        const allPositions = new Map(
+          next.get('all') ?? []
+        );
+
+        allPositions.set(id, point);
+        next.set('all', allPositions);
+      }
+
+      return next;
+    });
   };
 
   const handlePointerMove = (
@@ -1110,111 +1713,71 @@ export default function NetworkGraph({
     drag.moved = true;
     suppressClickRef.current = true;
 
-    const nextPoint = {
-      x: Math.max(
-        40,
-        Math.min(VIEW_WIDTH - 40, point.x + drag.offsetX)
-      ),
-      y: Math.max(
-        55,
-        Math.min(VIEW_HEIGHT - 55, point.y + drag.offsetY)
-      ),
-    };
+    const nextPoint = resolveDraggedPoint(drag.id, {
+      x: point.x + drag.offsetX,
+      y: point.y + drag.offsetY,
+    });
 
-    setCustomPositionsByView((previous) => {
-      const next = new Map(previous);
-      const viewPositions = new Map(
-        next.get(layoutKey) ?? []
+    drag.position = nextPoint;
+    nodeRefs.current
+      .get(drag.id)
+      ?.setAttribute(
+        'transform',
+        `translate(${nextPoint.x},${nextPoint.y})`
       );
 
-      viewPositions.set(drag.id, nextPoint);
-      next.set(layoutKey, viewPositions);
+    relationIndex.relationshipsByNode
+      .get(drag.id)
+      ?.forEach((rel) => {
+        const source =
+          rel.sourceId === drag.id
+            ? nextPoint
+            : pos.get(rel.sourceId);
+        const target =
+          rel.targetId === drag.id
+            ? nextPoint
+            : pos.get(rel.targetId);
+        const line = edgeRefs.current.get(rel.id);
 
-      if (layoutKey !== 'all') {
-        const allPositions = new Map(
-          next.get('all') ?? []
-        );
-
-        allPositions.set(drag.id, nextPoint);
-        next.set('all', allPositions);
-      }
-
-      return next;
-    });
+        if (source && target && line) {
+          line.setAttribute('x1', `${source.x}`);
+          line.setAttribute('y1', `${source.y}`);
+          line.setAttribute('x2', `${target.x}`);
+          line.setAttribute('y2', `${target.y}`);
+        }
+      });
   };
 
   const handlePointerUp = () => {
-    if (!dragRef.current) {
+    const drag = dragRef.current;
+
+    if (!drag) {
       return;
     }
 
-    suppressClickRef.current = dragRef.current.moved;
+    if (drag.moved && drag.position) {
+      commitCustomPosition(drag.id, drag.position);
+    }
+
+    suppressClickRef.current = drag.moved;
+    nodeRefs.current.get(drag.id)?.classList.remove('dragging');
     dragRef.current = undefined;
-    setDraggingId(undefined);
+    dragSpatialHashRef.current = undefined;
   };
 
   /*
    * Vecinos del nodo seleccionado.
    */
-  const related =
-    new Set(
-      selectedId
-        ? getRelationsFor(
-            selectedId,
-            relationships
-          ).map(
-            (rel) =>
-              getOtherId(
-                rel,
-                selectedId
-              )
-          )
-        : []
-    );
-
-  const hoveredRelated =
-    new Set(
-      hoveredId
-        ? getRelationsFor(
-            hoveredId,
-            relationships
-          ).map(
-            (rel) =>
-              getOtherId(
-                rel,
-                hoveredId
-              )
-          )
-        : []
-    );
+  const related = selectedId
+    ? relationIndex.neighborsByNode.get(selectedId) ??
+      EMPTY_NEIGHBORS
+    : EMPTY_NEIGHBORS;
 
   /*
    * Grado de cada nodo: contamos nodos vecinos únicos, no relaciones
    * repetidas entre el mismo par.
    */
-  const connectionCounts = useMemo(() => {
-    const neighbors = new Map<string, Set<string>>();
-
-    relationships.forEach((rel) => {
-      const sourceNeighbors =
-        neighbors.get(rel.sourceId) ?? new Set<string>();
-      const targetNeighbors =
-        neighbors.get(rel.targetId) ?? new Set<string>();
-
-      sourceNeighbors.add(rel.targetId);
-      targetNeighbors.add(rel.sourceId);
-
-      neighbors.set(rel.sourceId, sourceNeighbors);
-      neighbors.set(rel.targetId, targetNeighbors);
-    });
-
-    return new Map(
-      [...neighbors].map(([id, nodeNeighbors]) => [
-        id,
-        nodeNeighbors.size,
-      ])
-    );
-  }, [relationships]);
+  const { connectionCounts } = relationIndex;
 
   const introProgressClass =
     intro
@@ -1323,7 +1886,7 @@ export default function NetworkGraph({
         <svg
           ref={svgRef}
           className="graph"
-          viewBox={`${viewBox.x} ${viewBox.y} ${viewBox.width} ${viewBox.height}`}
+          viewBox={`${viewBoxRef.current.x} ${viewBoxRef.current.y} ${viewBoxRef.current.width} ${viewBoxRef.current.height}`}
           role="img"
           aria-label="Mapa interactivo de relaciones"
           preserveAspectRatio="xMidYMid meet"
@@ -1378,90 +1941,31 @@ export default function NetworkGraph({
                     rel.targetId ===
                       selectedId);
 
-                const hoverActive =
-                  !intro &&
-                  !!hoveredId &&
-                  (rel.sourceId ===
-                    hoveredId ||
-                    rel.targetId ===
-                      hoveredId);
-
                 const muted =
                   !intro &&
                   !!selectedId &&
-                  !active &&
-                  !hoverActive;
+                  !active;
 
-                const lp =
-                  labelPoint(
-                    a,
-                    b,
-                    rel,
-                    selectedId
-                  );
-
-                const labelWidth =
-                  Math.max(
-                    112,
-                    rel.type
-                      .length *
-                      7.2 +
-                      24
-                  );
+                const labelPosition = active
+                  ? labelPoint(a, b, rel, selectedId)
+                  : undefined;
+                const labelWidth = Math.max(
+                  112,
+                  rel.type.length * 7.2 + 24
+                );
 
                 return (
-                  <g
-                    key={
-                      rel.id
-                    }
-                    className={`edge ${
-                      active
-                        ? 'active'
-                        : ''
-                    } ${
-                      hoverActive
-                        ? 'hover-active'
-                        : ''
-                    } ${
-                      muted
-                        ? 'muted'
-                        : ''
-                    }`}
-                  >
-                    <line
-                      x1={a.x}
-                      y1={a.y}
-                      x2={b.x}
-                      y2={b.y}
-                    />
-
-                    {active && (
-                      <g
-                        className="edge-label"
-                        transform={`translate(${lp.x},${lp.y})`}
-                      >
-                        <rect
-                          x={
-                            -labelWidth /
-                            2
-                          }
-                          y="-14"
-                          width={
-                            labelWidth
-                          }
-                          height="28"
-                          rx="14"
-                        />
-
-                        <text
-                          x="0"
-                          y="4"
-                        >
-                          {rel.type}
-                        </text>
-                      </g>
-                    )}
-                  </g>
+                  <GraphEdge
+                    key={rel.id}
+                    rel={rel}
+                    a={a}
+                    b={b}
+                    active={active}
+                    muted={muted}
+                    labelPosition={labelPosition}
+                    labelWidth={labelWidth}
+                    edgeRef={getEdgeRef(rel.id)}
+                  />
                 );
               }
             )}
@@ -1498,20 +2002,9 @@ export default function NetworkGraph({
                   !selected &&
                   !neighbor;
 
-                const hovered =
-                  !intro &&
-                  record.id ===
-                    hoveredId;
-
-                const showName =
-                  !intro &&
-                  (hovered ||
-                    hoveredRelated.has(
-                      record.id
-                    ));
-
                 return (
                   <g
+                    ref={getNodeRef(record.id)}
                     key={
                       record.id
                     }
@@ -1524,26 +2017,12 @@ export default function NetworkGraph({
                         ? 'neighbor'
                         : ''
                     } ${
-                      hoveredRelated.has(
-                        record.id
-                      )
-                        ? 'hover-neighbor'
-                        : ''
-                    } ${
-                      hovered
-                        ? 'hovered'
-                        : ''
-                    } ${
                       dim
                         ? 'dim'
                         : ''
                     } ${
                       intro
                         ? 'intro-node'
-                        : ''
-                    } ${
-                      draggingId === record.id
-                        ? 'dragging'
                         : ''
                     }`}
                     transform={`translate(${p.x},${p.y})`}
@@ -1562,23 +2041,23 @@ export default function NetworkGraph({
                     aria-label={`${record.name}, ${record.type}, ${connectionCount} ${connectionCount === 1 ? 'conexión' : 'conexiones'}`}
                     onMouseEnter={() =>
                       !intro &&
-                      setHoveredId(
+                      setHoveredNode(
                         record.id
                       )
                     }
                     onMouseLeave={() =>
-                      setHoveredId(
+                      setHoveredNode(
                         undefined
                       )
                     }
                     onFocus={() =>
                       !intro &&
-                      setHoveredId(
+                      setHoveredNode(
                         record.id
                       )
                     }
                     onBlur={() =>
-                      setHoveredId(
+                      setHoveredNode(
                         undefined
                       )
                     }
@@ -1621,11 +2100,9 @@ export default function NetworkGraph({
                       r={
                         selected
                           ? 27
-                          : hovered
-                            ? 25
-                            : intro
-                              ? 13
-                              : sizes.halo
+                          : intro
+                            ? 13
+                            : sizes.halo
                       }
                     />
 
@@ -1636,29 +2113,23 @@ export default function NetworkGraph({
                       r={
                         selected
                           ? 8
-                          : hovered
-                            ? 7
-                            : neighbor
-                              ? Math.max(5.5, sizes.core)
-                              : intro
-                                ? 4
-                                : sizes.core
+                          : neighbor
+                            ? Math.max(5.5, sizes.core)
+                            : intro
+                              ? 4
+                              : sizes.core
                       }
                     />
 
                     {/* NOMBRE */}
 
-                    {showName && (
-                      <text
-                        className="node-name"
-                        pointerEvents="none"
-                        y={
-                          sizes.halo + 15
-                      }
-                      >
-                        {record.name}
-                      </text>
-                    )}
+                    <text
+                      className="node-name"
+                      pointerEvents="none"
+                      y={sizes.halo + 15}
+                    >
+                      {record.name}
+                    </text>
                   </g>
                 );
               }
@@ -1702,3 +2173,5 @@ export default function NetworkGraph({
     </section>
   );
 }
+
+export default memo(NetworkGraph);

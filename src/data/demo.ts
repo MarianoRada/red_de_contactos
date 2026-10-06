@@ -230,6 +230,57 @@ for (let i = 1; i <= 20; i++) {
 
 /*
  * ============================================================
+ * 300 NODOS ADICIONALES
+ * ============================================================
+ */
+
+// 150 personas adicionales.
+for (let i = 1; i <= 150; i++) {
+  const firstName =
+    firstNames[(i + 4) % firstNames.length];
+
+  const lastName =
+    lastNames[(i * 7 + 2) % lastNames.length];
+
+  records.push({
+    id: `persona-extra-${i}`,
+    name: `${firstName} ${lastName} ${i + 60}`,
+    description:
+      `Perfil adicional vinculado a proyectos, ecosistemas y redes de colaboracion. Perfil demo ${i + 60}.`,
+    email: `persona-extra-${i}@ejemplo.org`,
+    location: locations[(i + 4) % locations.length],
+    type: 'person',
+  });
+}
+
+// 75 proyectos adicionales.
+for (let i = 1; i <= 75; i++) {
+  records.push({
+    id: `proyecto-extra-${i}`,
+    name: `Proyecto Demo ${i + 20}`,
+    description:
+      'Proyecto adicional de educacion, desarrollo social e innovacion.',
+    email: `proyecto-extra-${i}@ejemplo.org`,
+    location: locations[(i * 5) % locations.length],
+    type: 'institution',
+  });
+}
+
+// 75 ecosistemas adicionales.
+for (let i = 1; i <= 75; i++) {
+  records.push({
+    id: `ecosistema-extra-${i}`,
+    name: `Ecosistema Demo ${i + 20}`,
+    description:
+      'Ecosistema adicional vinculado a tecnologia, servicios e innovacion.',
+    email: `ecosistema-extra-${i}@ejemplo.org`,
+    location: locations[(i * 7) % locations.length],
+    type: 'company',
+  });
+}
+
+/*
+ * ============================================================
  * RELACIONES EXTRA
  * ============================================================
  */
@@ -287,6 +338,56 @@ for (let i = 1; i <= 20; i++) {
     )
   );
 }
+
+/*
+ * Relaciones para los 300 nodos adicionales.
+ * Cada nodo nuevo queda con entre 0 y 6 vecinos unicos.
+ */
+const baseRecordIds = records
+  .filter((record) => !record.id.includes('-extra-'))
+  .map((record) => record.id);
+
+const mockRelationshipTypes: Relationship['type'][] = [
+  'colabora con',
+  'trabaja en',
+  'participa en',
+  'forma parte de',
+  'coordina',
+];
+
+const extraRecordIds = records
+  .filter((record) => record.id.includes('-extra-'))
+  .map((record) => record.id);
+
+extraRecordIds.forEach((recordId, index) => {
+  const connectionCount = (index + 1) % 7;
+  const targetIds = new Set<string>();
+
+  for (
+    let attempt = 0;
+    targetIds.size < connectionCount;
+    attempt++
+  ) {
+    const targetIndex =
+      (index * 17 + attempt * 23 + 11) %
+      baseRecordIds.length;
+
+    targetIds.add(baseRecordIds[targetIndex]);
+  }
+
+  [...targetIds].forEach((targetId, relationIndex) => {
+    relationships.push(
+      r(
+        `extra-node-relation-${index + 1}-${relationIndex + 1}`,
+        recordId,
+        targetId,
+        mockRelationshipTypes[
+          (index + relationIndex) % mockRelationshipTypes.length
+        ]
+      )
+    );
+  });
+});
 
 export const demoData: AppData = {
   records,

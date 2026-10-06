@@ -147,7 +147,7 @@ button {
   stroke: #66717b;
   stroke-width: .8;
   opacity: .42;
-  transition: all .25s;
+  transition: none;
 }
 
 .edge.active line {
@@ -186,7 +186,7 @@ button {
   stroke: #e6edf2;
   stroke-width: .5;
   filter: drop-shadow(0 0 5px var(--type));
-  transition: all .2s;
+  transition: fill .15s, stroke .15s, filter .15s;
 }
 
 .node-halo {
@@ -194,7 +194,7 @@ button {
   stroke: var(--type);
   stroke-width: .6;
   opacity: .22;
-  transition: all .2s;
+  transition: opacity .15s, stroke-width .15s, filter .15s;
 }
 
 .node:hover .node-core,
@@ -220,16 +220,17 @@ button {
   font-size: 10px;
   font-weight: 500;
   fill: #77818b;
-  opacity: .72;
-  transition: all .2s;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity .12s;
 }
 
 .node:hover .node-name,
-.node.selected .node-name,
-.node.neighbor .node-name,
+.node.hovered .node-name,
 .node.hover-neighbor .node-name {
   fill: #e7edf2;
   opacity: 1;
+  visibility: visible;
 }
 
 .node.selected .node-name {
@@ -1423,7 +1424,7 @@ button {
 }
 
 .node-core {
-  filter: drop-shadow(0 0 7px var(--type));
+  filter: none;
 }
 
 .node-halo {
@@ -1431,7 +1432,13 @@ button {
 }
 
 .intro-running .network-lines {
-  animation: intro-lines 6.2s ease-out both;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.intro-finished .network-lines {
+  opacity: 1;
+  transition: opacity .35s ease-out;
 }
 
 .intro-running .node.intro-node {
@@ -1440,41 +1447,13 @@ button {
 }
 
 .intro-running .node.intro-node .node-core {
-  filter:
-    drop-shadow(0 0 8px var(--type))
-    drop-shadow(0 0 16px var(--type));
+  filter: none;
 }
 
 .intro-running .node.intro-node .node-halo {
   opacity: .42;
-  filter: drop-shadow(0 0 9px var(--type));
+  filter: none;
 }
-
-@keyframes intro-lines {
-  0%,
-  24% {
-    opacity: 0;
-  }
-
-  52% {
-    opacity: .07;
-  }
-
-  78% {
-    opacity: .45;
-  }
-
-  100% {
-    opacity: 1;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .intro-running .network-lines {
-    animation-duration: .01ms;
-  }
-}
-
 
 /* v7: al explorar un nodo, sus conexiones también ganan protagonismo. */
 

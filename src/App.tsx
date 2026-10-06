@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import Sidebar from './components/Sidebar';
 import DetailsPanel from './components/DetailsPanel';
@@ -118,13 +118,21 @@ export default function App() {
     }
   };
 
-  const handleGraphSelect = (id: string) => {
-    if (selectedId === id) {
-      setRightOpen(true);
-    } else {
-      setSelectedId(id);
-    }
-  };
+  const handleGraphSelect = useCallback(
+    (id: string) => {
+      if (selectedId === id) {
+        setRightOpen(true);
+      } else {
+        setSelectedId(id);
+      }
+    },
+    [selectedId]
+  );
+
+  const clearGraphSelection = useCallback(
+    () => setSelectedId(undefined),
+    []
+  );
 
   return (
     <main
@@ -153,7 +161,7 @@ export default function App() {
         relationships={data.relationships}
         selectedId={selectedId}
         onSelect={handleGraphSelect}
-        onClear={() => setSelectedId(undefined)}
+        onClear={clearGraphSelection}
       />
 
       <DetailsPanel
