@@ -131,7 +131,7 @@ const relationships: Relationship[] = [
 
 /*
  * ============================================================
- * DATOS EXTRA PARA PRUEBA DE RENDIMIENTO — 100 NODOS
+ * DATOS EXTRA PARA PRUEBA DE RENDIMIENTO — 489 NODOS
  * ============================================================
  */
 
@@ -230,12 +230,12 @@ for (let i = 1; i <= 20; i++) {
 
 /*
  * ============================================================
- * 300 NODOS ADICIONALES
+ * 489 NODOS ADICIONALES
  * ============================================================
  */
 
-// 150 personas adicionales.
-for (let i = 1; i <= 150; i++) {
+// 245 personas adicionales.
+for (let i = 1; i <= 245; i++) {
   const firstName =
     firstNames[(i + 4) % firstNames.length];
 
@@ -253,8 +253,8 @@ for (let i = 1; i <= 150; i++) {
   });
 }
 
-// 75 proyectos adicionales.
-for (let i = 1; i <= 75; i++) {
+// 122 proyectos adicionales.
+for (let i = 1; i <= 122; i++) {
   records.push({
     id: `proyecto-extra-${i}`,
     name: `Proyecto Demo ${i + 20}`,
@@ -266,8 +266,8 @@ for (let i = 1; i <= 75; i++) {
   });
 }
 
-// 75 ecosistemas adicionales.
-for (let i = 1; i <= 75; i++) {
+// 122 ecosistemas adicionales.
+for (let i = 1; i <= 122; i++) {
   records.push({
     id: `ecosistema-extra-${i}`,
     name: `Ecosistema Demo ${i + 20}`,
@@ -340,7 +340,7 @@ for (let i = 1; i <= 20; i++) {
 }
 
 /*
- * Relaciones para los 300 nodos adicionales.
+ * Relaciones para los 489 nodos adicionales.
  * Cada nodo nuevo queda con entre 0 y 6 vecinos unicos.
  */
 const baseRecordIds = records

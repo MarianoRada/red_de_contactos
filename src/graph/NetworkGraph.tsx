@@ -1896,21 +1896,6 @@ function NetworkGraph({
           onWheel={handleWheel}
           onClick={handleZoomClick}
         >
-          <defs>
-            <filter id="glow">
-              <feGaussianBlur
-                stdDeviation="3"
-                result="blur"
-              />
-
-              <feMerge>
-                <feMergeNode in="blur" />
-
-                <feMergeNode in="SourceGraphic" />
-              </feMerge>
-            </filter>
-          </defs>
-
           {/* RELACIONES */}
 
           <g className="network-lines">

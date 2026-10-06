@@ -128,7 +128,6 @@ button {
   height: 7px;
   border-radius: 50%;
   background: var(--type);
-  box-shadow: 0 0 8px var(--type);
 }
 
 .person {
@@ -154,7 +153,6 @@ button {
   stroke: #e7edf2;
   stroke-width: 1.05;
   opacity: .9;
-  filter: url(#glow);
 }
 
 .edge.muted line {
@@ -185,7 +183,7 @@ button {
   fill: var(--type);
   stroke: #e6edf2;
   stroke-width: .5;
-  filter: drop-shadow(0 0 5px var(--type));
+  filter: none;
   transition: fill .15s, stroke .15s, filter .15s;
 }
 
@@ -201,7 +199,7 @@ button {
 .node.selected .node-core {
   fill: #f7fbff;
   stroke: #fff;
-  filter: drop-shadow(0 0 9px #fff);
+  filter: none;
 }
 
 .node:hover .node-halo,
@@ -212,7 +210,7 @@ button {
 }
 
 .node.selected .node-halo {
-  filter: drop-shadow(0 0 9px var(--type));
+  filter: none;
 }
 
 .node-name {
@@ -256,13 +254,13 @@ button {
 .node.hovered .node-core {
   fill: #fff;
   stroke: #fff;
-  filter: drop-shadow(0 0 12px #fff);
+  filter: none;
 }
 
 .node.hovered .node-halo {
   opacity: .9;
   stroke-width: 1.2;
-  filter: drop-shadow(0 0 10px var(--type));
+  filter: none;
 }
 
 .node.dim {
@@ -1418,9 +1416,7 @@ button {
 }
 
 .dot {
-  box-shadow:
-    0 0 11px var(--type),
-    0 0 20px color-mix(in srgb, var(--type) 38%, transparent);
+  box-shadow: none;
 }
 
 .node-core {
@@ -1461,7 +1457,6 @@ button {
   stroke: #f3f8fc;
   stroke-width: 1.45;
   opacity: .92;
-  filter: url(#glow);
 }
 
 .edge.active.hover-active line {
