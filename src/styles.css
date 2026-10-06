@@ -177,6 +177,10 @@ button {
   transition: opacity .25s;
 }
 
+.node.dragging {
+  cursor: grabbing;
+}
+
 .node-core {
   fill: var(--type);
   stroke: #e6edf2;
@@ -222,7 +226,8 @@ button {
 
 .node:hover .node-name,
 .node.selected .node-name,
-.node.neighbor .node-name {
+.node.neighbor .node-name,
+.node.hover-neighbor .node-name {
   fill: #e7edf2;
   opacity: 1;
 }
@@ -1240,6 +1245,116 @@ button {
 
 .graph-stage .graph-title {
   width: min(620px, calc(100% - 40px));
+}
+
+.info-tool {
+  position: absolute;
+  top: 22px;
+  left: 24px;
+  z-index: 4;
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #2a3037;
+  border-radius: 9px;
+  background: #101419cc;
+  color: #8c98a3;
+  backdrop-filter: blur(10px);
+  transition: color .2s, border-color .2s, background .2s;
+}
+
+.info-tool:hover {
+  border-color: #6f7f8d;
+  background: #1a222bcc;
+  color: #f4f8fb;
+}
+
+.zoom-controls {
+  position: absolute;
+  top: 22px;
+  right: 24px;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.zoom-tool {
+  position: static;
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #2a3037;
+  border-radius: 9px;
+  background: #101419cc;
+  color: #8c98a3;
+  backdrop-filter: blur(10px);
+  transition: color .2s, border-color .2s, background .2s;
+}
+
+.zoom-tool:hover,
+.zoom-tool.active {
+  border-color: #6f7f8d;
+  background: #1a222bcc;
+  color: #f4f8fb;
+}
+
+.graph-stage.zoom-mode .graph,
+.graph-stage.zoom-mode .node {
+  cursor: zoom-in;
+}
+
+.graph-stage.zoom-out-mode .graph,
+.graph-stage.zoom-out-mode .node {
+  cursor: zoom-out;
+}
+
+.info-modal {
+  width: 75vw;
+  height: 75vh;
+  max-width: none;
+  max-height: 75vh;
+  padding: clamp(28px, 4vw, 64px);
+  border-radius: 18px;
+}
+
+.info-modal header {
+  position: relative;
+  display: block;
+  margin-bottom: clamp(28px, 5vh, 56px);
+}
+
+.info-modal h2 {
+  max-width: 19ch;
+  margin: 0 auto;
+  padding: 0 56px;
+  text-align: center;
+  font-size: clamp(48px, 7vw, 104px);
+  line-height: .98;
+  letter-spacing: -.045em;
+  font-weight: 500;
+}
+
+.info-modal .icon-btn {
+  position: absolute;
+  top: 0;
+  right: 0;
+}
+
+.info-modal-content {
+  max-width: 860px;
+  margin: 0 auto;
+  padding-bottom: 10vh;
+  text-align: center;
+}
+
+.info-modal-content p {
+  margin: 0;
+  color: #aeb8c1;
+  font-size: clamp(15px, 1.35vw, 20px);
+  line-height: 1.75;
 }
 
 .edge-label {
