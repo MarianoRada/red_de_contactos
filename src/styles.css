@@ -184,32 +184,15 @@ button {
   stroke: #e6edf2;
   stroke-width: .5;
   filter: none;
-  transition: fill .15s, stroke .15s, filter .15s;
-}
-
-.node-halo {
-  fill: transparent;
-  stroke: var(--type);
-  stroke-width: .6;
-  opacity: .22;
-  transition: opacity .15s, stroke-width .15s, filter .15s;
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: fill .15s, stroke .15s;
 }
 
 .node:hover .node-core,
 .node.selected .node-core {
   fill: #f7fbff;
   stroke: #fff;
-  filter: none;
-}
-
-.node:hover .node-halo,
-.node.selected .node-halo,
-.node.neighbor .node-halo {
-  opacity: .65;
-  stroke-width: .9;
-}
-
-.node.selected .node-halo {
   filter: none;
 }
 
@@ -257,23 +240,12 @@ button {
   filter: none;
 }
 
-.node.hovered .node-halo {
-  opacity: .9;
-  stroke-width: 1.2;
-  filter: none;
-}
-
 .node.dim {
   opacity: .09;
 }
 
 .node:focus {
   outline: none;
-}
-
-.node:focus .node-halo {
-  stroke: #fff;
-  opacity: 1;
 }
 
 .graph-hint {
@@ -1423,10 +1395,6 @@ button {
   filter: none;
 }
 
-.node-halo {
-  opacity: .32;
-}
-
 .intro-running .network-lines {
   opacity: 0;
   pointer-events: none;
@@ -1443,11 +1411,6 @@ button {
 }
 
 .intro-running .node.intro-node .node-core {
-  filter: none;
-}
-
-.intro-running .node.intro-node .node-halo {
-  opacity: .42;
   filter: none;
 }
 

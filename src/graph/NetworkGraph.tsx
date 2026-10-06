@@ -1,4 +1,11 @@
-import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  memo,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import type { MouseEvent, PointerEvent, WheelEvent } from 'react';
 import {
   Info,
@@ -54,6 +61,8 @@ type ViewBox = {
 type ZoomDirection = 'in' | 'out';
 
 const INTRO_MS = 6200;
+const INTRO_GROWTH_MS = 2000;
+const INTRO_CORE_RADIUS = 4;
 
 /* Área lógica moderada para que 400–600 nodos grandes entren sin colisiones. */
 const VIEW_WIDTH = 2000;
@@ -66,12 +75,22 @@ const CX = VIEW_WIDTH / 2;
 const CY = VIEW_HEIGHT / 2;
 
 /*
- * Separación mínima entre nodos.
- * Si querés más aire después, podés subirlo a 68 o 70.
+ * Separación mínima entre los núcleos visibles. El hover puede ampliar
+ * visualmente un núcleo, pero no participa del layout.
  */
-const NODE_GAP = 8;
+const NODE_GAP = 4;
 const SPATIAL_CELL_SIZE = 96;
-const MAX_LAYOUT_RADIUS = 34;
+const MIN_NODE_RADIUS = 3.5;
+const NODE_RADIUS_STEP = 1.35;
+const BASE_MAX_NODE_RADIUS = 16;
+const EXTRA_NODE_RADIUS_STEP = 1.35;
+const EXTRA_CONNECTIONS_START = 10;
+const EXTRA_CONNECTIONS_PER_STEP = 2;
+// Safety cap for pathological records; normal high-degree nodes continue
+// growing well beyond 10 connections before reaching it.
+const MAX_NODE_RADIUS = 28;
+// The layout bounds use the same maximum as the visible core.
+const MAX_LAYOUT_RADIUS = MAX_NODE_RADIUS;
 
 /*
  * Cantidad de brazos de la galaxia.
@@ -139,7 +158,7 @@ export function positions(
   });
 
   const radiusFor = (id: string) =>
-    nodeSizes(neighborsByNode.get(id)?.size ?? 0).halo;
+    nodeSizes(neighborsByNode.get(id)?.size ?? 0).core;
 
   const registerPosition = (id: string, point: P) => {
     map.set(id, point);
@@ -909,9 +928,21 @@ const GraphEdge = memo(function GraphEdge({
 });
 
 function nodeSizes(connectionCount: number) {
+  const baseRadius = Math.min(
+    MIN_NODE_RADIUS + connectionCount * NODE_RADIUS_STEP,
+    BASE_MAX_NODE_RADIUS
+  );
+  const extraConnectionCount = Math.max(
+    0,
+    connectionCount - EXTRA_CONNECTIONS_START
+  );
+  const extraRadius =
+    Math.floor(
+      extraConnectionCount / EXTRA_CONNECTIONS_PER_STEP
+    ) * EXTRA_NODE_RADIUS_STEP;
+
   return {
-    halo: Math.min(13 + connectionCount * 3, 34),
-    core: Math.min(3.5 + connectionCount, 10),
+    core: Math.min(baseRadius + extraRadius, MAX_NODE_RADIUS),
   };
 }
 
@@ -1163,7 +1194,7 @@ function NetworkGraph({
         id,
         nodeSizes(
           relationIndex.connectionCounts.get(id) ?? 0
-        ).halo,
+        ).core,
       ])
     );
 
@@ -1347,6 +1378,46 @@ function NetworkGraph({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /*
+   * El layout final ya contiene el radio real de cada nÃºcleo. Para evitar que
+   * aparezca de golpe al terminar la intro, conservamos visualmente el radio
+   * inicial y animamos solo un transform del SVG durante 1,5 segundos.
+   */
+  useLayoutEffect(() => {
+    if (intro) {
+      return;
+    }
+
+    const cores = [...nodeRefs.current.values()]
+      .map((node) =>
+        node.querySelector<SVGCircleElement>('.node-core')
+      )
+      .filter((core): core is SVGCircleElement => core !== null);
+
+    cores.forEach((core) => {
+      const finalRadius = Number(core.getAttribute('r')) || INTRO_CORE_RADIUS;
+      const initialScale = Math.min(
+        1,
+        INTRO_CORE_RADIUS / finalRadius
+      );
+
+      core.style.transformBox = 'fill-box';
+      core.style.transformOrigin = 'center';
+      core.style.transition = 'none';
+      core.style.transform = `scale(${initialScale})`;
+      void core.getBoundingClientRect();
+      core.style.transition = `transform ${INTRO_GROWTH_MS}ms ease-in-out`;
+    });
+
+    const growthFrame = requestAnimationFrame(() => {
+      cores.forEach((core) => {
+        core.style.transform = 'scale(1)';
+      });
+    });
+
+    return () => cancelAnimationFrame(growthFrame);
+  }, [intro]);
+
   const pos =
     intro
       ? startPos
@@ -1366,13 +1437,8 @@ function NetworkGraph({
     const sizes = nodeSizes(
       relationIndex.connectionCounts.get(id) ?? 0
     );
-    const halo = node.querySelector<SVGCircleElement>('.node-halo');
     const core = node.querySelector<SVGCircleElement>('.node-core');
 
-    halo?.setAttribute(
-      'r',
-      `${active ? Math.max(25, sizes.halo) : selected ? 27 : introNode ? 13 : sizes.halo}`
-    );
     core?.setAttribute(
       'r',
       `${active ? Math.max(7, sizes.core) : selected ? 8 : introNode ? 4 : sizes.core}`
@@ -1445,7 +1511,7 @@ function NetworkGraph({
     const occupied = dragSpatialHashRef.current;
     const radius = nodeSizes(
       relationIndex.connectionCounts.get(id) ?? 0
-    ).halo;
+    ).core;
     const maxRadius = MAX_LAYOUT_RADIUS;
     const bounds = {
       minX: maxRadius + NODE_GAP,
@@ -1642,7 +1708,7 @@ function NetworkGraph({
           otherPoint,
           nodeSizes(
             relationIndex.connectionCounts.get(otherId) ?? 0
-          ).halo
+          ).core
         );
       }
     });
@@ -2078,19 +2144,6 @@ function NetworkGraph({
                     }}
                   >
 
-                    {/* HALO */}
-
-                    <circle
-                      className="node-halo"
-                      r={
-                        selected
-                          ? 27
-                          : intro
-                            ? 13
-                            : sizes.halo
-                      }
-                    />
-
                     {/* NÚCLEO */}
 
                     <circle
@@ -2111,7 +2164,7 @@ function NetworkGraph({
                     <text
                       className="node-name"
                       pointerEvents="none"
-                      y={sizes.halo + 15}
+                      y={sizes.core + 15}
                     >
                       {record.name}
                     </text>
