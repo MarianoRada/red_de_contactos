@@ -1,0 +1,13 @@
+{
+  "name": "red-contactos",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-10-07",
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "red-contactos-db",
+      "database_id": "b53848ef-60cb-48e3-b1e1-b1786ef16c30"
+    }
+  ]
+}

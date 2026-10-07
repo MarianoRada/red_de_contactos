@@ -8,17 +8,12 @@ import RelationshipModal from './components/RelationshipModal';
 
 import {
   loadData,
-  resetData,
-  saveData,
-} from './lib/storage';
-
-import {
-  addRecord,
-  addRelationship,
-  deleteRecord,
-  deleteRelationship,
-  updateRecord,
-} from './lib/relations';
+  createRecord,
+  updateRecord as updateRecordApi,
+  deleteRecord as deleteRecordApi,
+  createRelationship,
+  deleteRelationship as deleteRelationshipApi,
+} from './lib/api';
 
 import type {
   AppData,
@@ -27,23 +22,67 @@ import type {
   Relationship,
 } from './types/models';
 
+const EMPTY_DATA: AppData = {
+  records: [],
+  relationships: [],
+};
+
 export default function App() {
-  const [data, setData] = useState<AppData>(() => loadData());
+  const [data, setData] = useState<AppData>(EMPTY_DATA);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string>();
 
   const [selectedId, setSelectedId] = useState<string>();
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<'all' | RecordType>('all');
 
-  const [recordModal, setRecordModal] = useState<'new' | 'edit' | null>(null);
+  const [recordModal, setRecordModal] =
+    useState<'new' | 'edit' | null>(null);
+
   const [relationModal, setRelationModal] = useState(false);
 
   // Los paneles laterales comienzan cerrados
   const [leftOpen, setLeftOpen] = useState(false);
   const [rightOpen, setRightOpen] = useState(false);
 
+  // ==========================================
+  // CARGA INICIAL DESDE D1
+  // ==========================================
+
   useEffect(() => {
-    saveData(data);
-  }, [data]);
+    let cancelled = false;
+
+    const fetchData = async () => {
+      try {
+        setLoading(true);
+        setError(undefined);
+
+        const loadedData = await loadData();
+
+        if (!cancelled) {
+          setData(loadedData);
+        }
+      } catch (err) {
+        console.error(err);
+
+        if (!cancelled) {
+          setError(
+            'No se pudieron cargar los datos.'
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    };
+
+    void fetchData();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const selected = data.records.find(
     (record) => record.id === selectedId
@@ -61,18 +100,51 @@ export default function App() {
     [data.records, filter, query]
   );
 
-  const saveRecord = (record: ContactRecord) => {
-    setData((currentData) =>
-      recordModal === 'edit'
-        ? updateRecord(currentData, record)
-        : addRecord(currentData, record)
-    );
+  // ==========================================
+  // RECORDS
+  // ==========================================
 
-    setSelectedId(record.id);
-    setRecordModal(null);
+  const saveRecord = async (record: ContactRecord) => {
+    try {
+      setError(undefined);
+
+      if (recordModal === 'edit') {
+        const savedRecord = await updateRecordApi(record);
+
+        setData((currentData) => ({
+          ...currentData,
+          records: currentData.records.map((currentRecord) =>
+            currentRecord.id === savedRecord.id
+              ? savedRecord
+              : currentRecord
+          ),
+        }));
+      } else {
+        const savedRecord = await createRecord(record);
+
+        setData((currentData) => ({
+          ...currentData,
+          records: [
+            ...currentData.records,
+            savedRecord,
+          ],
+        }));
+      }
+
+      setSelectedId(record.id);
+      setRecordModal(null);
+    } catch (err) {
+      console.error(err);
+
+      setError(
+        recordModal === 'edit'
+          ? 'No se pudo actualizar el registro.'
+          : 'No se pudo crear el registro.'
+      );
+    }
   };
 
-  const removeRecord = () => {
+  const removeRecord = async () => {
     if (
       !selected ||
       !confirm(
@@ -82,41 +154,93 @@ export default function App() {
       return;
     }
 
-    setData((currentData) =>
-      deleteRecord(currentData, selected.id)
-    );
+    try {
+      setError(undefined);
 
-    setSelectedId(undefined);
-  };
+      await deleteRecordApi(selected.id);
 
-  const saveRel = (relationship: Relationship) => {
-    setData((currentData) =>
-      addRelationship(currentData, relationship)
-    );
+      setData((currentData) => ({
+        records: currentData.records.filter(
+          (record) => record.id !== selected.id
+        ),
+        relationships: currentData.relationships.filter(
+          (relationship) =>
+            relationship.sourceId !== selected.id &&
+            relationship.targetId !== selected.id
+        ),
+      }));
 
-    setRelationModal(false);
-  };
+      setSelectedId(undefined);
+    } catch (err) {
+      console.error(err);
 
-  const removeRel = (id: string) => {
-    if (confirm('¿Eliminar esta relación?')) {
-      setData((currentData) =>
-        deleteRelationship(currentData, id)
+      setError(
+        'No se pudo eliminar el registro.'
       );
     }
   };
 
-  const reset = () => {
-    if (
-      confirm(
-        'Esto eliminará los cambios realizados y restaurará los datos de ejemplo.'
-      )
-    ) {
-      setData(resetData());
-      setSelectedId(undefined);
-      setQuery('');
-      setFilter('all');
+  // ==========================================
+  // RELATIONSHIPS
+  // ==========================================
+
+  const saveRel = async (
+    relationship: Relationship
+  ) => {
+    try {
+      setError(undefined);
+
+      const savedRelationship =
+        await createRelationship(relationship);
+
+      setData((currentData) => ({
+        ...currentData,
+        relationships: [
+          ...currentData.relationships,
+          savedRelationship,
+        ],
+      }));
+
+      setRelationModal(false);
+    } catch (err) {
+      console.error(err);
+
+      setError(
+        'No se pudo crear la relación.'
+      );
     }
   };
+
+  const removeRel = async (id: string) => {
+    if (!confirm('¿Eliminar esta relación?')) {
+      return;
+    }
+
+    try {
+      setError(undefined);
+
+      await deleteRelationshipApi(id);
+
+      setData((currentData) => ({
+        ...currentData,
+        relationships:
+          currentData.relationships.filter(
+            (relationship) =>
+              relationship.id !== id
+          ),
+      }));
+    } catch (err) {
+      console.error(err);
+
+      setError(
+        'No se pudo eliminar la relación.'
+      );
+    }
+  };
+
+  // ==========================================
+  // GRAPH
+  // ==========================================
 
   const handleGraphSelect = useCallback(
     (id: string) => {
@@ -134,6 +258,32 @@ export default function App() {
     []
   );
 
+  // ==========================================
+  // LOADING
+  // ==========================================
+
+  if (loading) {
+    return (
+      <main className="app-shell">
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          Cargando red...
+        </div>
+      </main>
+    );
+  }
+
+  // ==========================================
+  // APP
+  // ==========================================
+
   return (
     <main
       className={`app-shell ${
@@ -142,9 +292,30 @@ export default function App() {
         rightOpen ? 'right-open' : 'right-closed'
       }`}
     >
+      {error && (
+        <div
+          style={{
+            position: 'fixed',
+            top: 16,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 9999,
+            background: '#fff',
+            padding: '10px 16px',
+            borderRadius: 8,
+            boxShadow:
+              '0 4px 20px rgba(0, 0, 0, 0.15)',
+          }}
+        >
+          {error}
+        </div>
+      )}
+
       <Sidebar
         open={leftOpen}
-        onToggle={() => setLeftOpen((value) => !value)}
+        onToggle={() =>
+          setLeftOpen((value) => !value)
+        }
         records={shown}
         selectedId={selectedId}
         query={query}
@@ -153,7 +324,10 @@ export default function App() {
         setFilter={setFilter}
         onSelect={setSelectedId}
         onNew={() => setRecordModal('new')}
-        onReset={reset}
+
+        // Reset de datos eliminado.
+        // D1 es ahora la fuente de verdad.
+        onReset={() => {}}
       />
 
       <NetworkGraph
@@ -166,21 +340,31 @@ export default function App() {
 
       <DetailsPanel
         open={rightOpen}
-        onToggle={() => setRightOpen((value) => !value)}
+        onToggle={() =>
+          setRightOpen((value) => !value)
+        }
         record={selected}
         records={data.records}
         relationships={data.relationships}
         onSelect={setSelectedId}
         onEdit={() => setRecordModal('edit')}
         onDelete={removeRecord}
-        onAddRelation={() => setRelationModal(true)}
+        onAddRelation={() =>
+          setRelationModal(true)
+        }
         onDeleteRelation={removeRel}
       />
 
       {recordModal && (
         <RecordModal
-          record={recordModal === 'edit' ? selected : undefined}
-          onClose={() => setRecordModal(null)}
+          record={
+            recordModal === 'edit'
+              ? selected
+              : undefined
+          }
+          onClose={() =>
+            setRecordModal(null)
+          }
           onSave={saveRecord}
         />
       )}
@@ -190,7 +374,9 @@ export default function App() {
           current={selected}
           records={data.records}
           relationships={data.relationships}
-          onClose={() => setRelationModal(false)}
+          onClose={() =>
+            setRelationModal(false)
+          }
           onSave={saveRel}
         />
       )}
