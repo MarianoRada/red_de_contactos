@@ -38,6 +38,7 @@ type DetailsPanelProps = {
   onDelete: () => void;
   onAddRelation: () => void;
   onDeleteRelation: (id: string) => void;
+  isAdmin: boolean;
 };
 
 export default function DetailsPanel({
@@ -51,6 +52,7 @@ export default function DetailsPanel({
   onDelete,
   onAddRelation,
   onDeleteRelation,
+  isAdmin,
 }: DetailsPanelProps) {
   if (!open) {
     return (
@@ -93,13 +95,15 @@ export default function DetailsPanel({
         {record.location && <div><MapPin size={15} /><span>{record.location}</span></div>}
         <div><Link2 size={15} /><span>{rels.length} {rels.length === 1 ? 'conexión' : 'conexiones'}</span></div>
       </div>
-      <div className="detail-actions">
-        <button className="btn secondary" onClick={onEdit}><Pencil size={15} /> Editar</button>
-        <button className="btn danger-soft" onClick={onDelete}><Trash2 size={15} /> Eliminar</button>
-      </div>
+      {isAdmin && (
+        <div className="detail-actions">
+          <button className="btn secondary" onClick={onEdit}><Pencil size={15} /> Editar</button>
+          <button className="btn danger-soft" onClick={onDelete}><Trash2 size={15} /> Eliminar</button>
+        </div>
+      )}
       <div className="relations-head">
         <h3>Conexiones</h3>
-        <button className="btn small primary" onClick={onAddRelation}><Plus size={15} /> Agregar</button>
+        {isAdmin && <button className="btn small primary" onClick={onAddRelation}><Plus size={15} /> Agregar</button>}
       </div>
       <div className="relation-list">
         {rels.map((rel) => {
@@ -112,7 +116,7 @@ export default function DetailsPanel({
                 <span className={'type-icon ' + other.type}><OtherIcon size={15} /></span>
                 <span><strong>{other.name}</strong><small>{labels[other.type]} · <b>{rel.type}</b></small></span>
               </button>
-              <button className="mini-delete" aria-label={`Eliminar relación con ${other.name}`} onClick={() => onDeleteRelation(rel.id)}><X size={15} /></button>
+              {isAdmin && <button className="mini-delete" aria-label={`Eliminar relación con ${other.name}`} onClick={() => onDeleteRelation(rel.id)}><X size={15} /></button>}
             </div>
           );
         })}

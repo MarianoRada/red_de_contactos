@@ -25,6 +25,7 @@
   },
   "include": [
     "src",
-    "worker"
+    "worker",
+    "functions"
   ]
 }

@@ -40,5 +40,15 @@ En la parte inferior de la barra izquierda elegí **Restablecer demo** y confirm
 ## Stack
 React + TypeScript + Vite + CSS. El grafo está implementado con SVG propio para mantener el prototipo liviano y sin dependencias de visualización adicionales.
 
+## Autenticación en Cloudflare Workers
+
+Las contraseñas del administrador se almacenan como PBKDF2-HMAC-SHA256 con sal aleatoria y 100.000 iteraciones. El Web Crypto de Cloudflare Workers rechaza PBKDF2 con más de 100.000 iteraciones (`NotSupportedError`), por lo que este es el máximo compatible con el runtime aunque otros entornos puedan recomendar un costo mayor. Cada usuario guarda su algoritmo e iteraciones en `admin_users`, y el login usa esos valores por registro; los hashes con un algoritmo o costo no soportado se rechazan sin error interno.
+
+Para probar el flujo completo en el runtime local compatible con Workers:
+
+```bash
+npm run test:auth
+```
+
 ## Variante visual oscura
 Esta versión adapta la interfaz a una visualización de red inmersiva: mapa a pantalla completa, nodos luminosos, conexiones atenuadas y paneles flotantes oscuros. La lógica de registros, relaciones y localStorage se mantiene.

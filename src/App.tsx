@@ -5,15 +5,24 @@ import DetailsPanel from './components/DetailsPanel';
 import NetworkGraph from './graph/NetworkGraph';
 import RecordModal from './components/RecordModal';
 import RelationshipModal from './components/RelationshipModal';
+import BulkImportModal from './components/BulkImportModal';
+import LoginModal from './components/LoginModal';
 
 import {
+  ApiError,
+  getAuthSession,
   loadData,
   createRecord,
   updateRecord as updateRecordApi,
   deleteRecord as deleteRecordApi,
   createRelationship,
   deleteRelationship as deleteRelationshipApi,
+  logoutAdmin,
+  setAuthFailureHandler,
 } from './lib/api';
+import { MAX_NODES } from './lib/nodeLimits';
+import type { BulkImportResult } from './lib/bulkImportTypes';
+import type { AuthSession } from './lib/authTypes';
 
 import type {
   AppData,
@@ -31,6 +40,12 @@ export default function App() {
   const [data, setData] = useState<AppData>(EMPTY_DATA);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authSession, setAuthSession] = useState<AuthSession>({
+    authenticated: false,
+    csrfToken: '',
+  });
+  const [loginOpen, setLoginOpen] = useState(false);
 
   const [selectedId, setSelectedId] = useState<string>();
   const [query, setQuery] = useState('');
@@ -40,10 +55,13 @@ export default function App() {
     useState<'new' | 'edit' | null>(null);
 
   const [relationModal, setRelationModal] = useState(false);
+  const [bulkImportOpen, setBulkImportOpen] = useState(false);
 
   // Los paneles laterales comienzan cerrados
   const [leftOpen, setLeftOpen] = useState(false);
   const [rightOpen, setRightOpen] = useState(false);
+
+  const isAdmin = authSession.authenticated;
 
   // ==========================================
   // CARGA INICIAL DESDE D1
@@ -81,6 +99,40 @@ export default function App() {
 
     return () => {
       cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    setAuthFailureHandler(() => {
+      if (!cancelled) {
+        setAuthSession({ authenticated: false, csrfToken: '' });
+        setError('La sesión expiró. Iniciá sesión nuevamente para continuar.');
+      }
+    });
+
+    void getAuthSession()
+      .then((session) => {
+        if (!cancelled) {
+          setAuthSession(session);
+        }
+      })
+      .catch((err) => {
+        console.error(err);
+        if (!cancelled) {
+          setAuthSession({ authenticated: false, csrfToken: '' });
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setAuthLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+      setAuthFailureHandler(undefined);
     };
   }, []);
 
@@ -136,10 +188,65 @@ export default function App() {
     } catch (err) {
       console.error(err);
 
+      const apiError = err instanceof ApiError ? err.body : undefined;
+      const errorCode =
+        typeof apiError === 'object' && apiError !== null && 'error' in apiError
+          ? String((apiError as { error: unknown }).error)
+          : undefined;
+
       setError(
-        recordModal === 'edit'
-          ? 'No se pudo actualizar el registro.'
-          : 'No se pudo crear el registro.'
+        errorCode === 'node_limit_exceeded'
+          ? `La red alcanzÃ³ el lÃ­mite de ${MAX_NODES.toLocaleString('es-AR')} nodos. EliminÃ¡ un registro antes de crear otro.`
+          : recordModal === 'edit'
+            ? 'No se pudo actualizar el registro.'
+            : 'No se pudo crear el registro.'
+      );
+    }
+  };
+
+  const openNewRecord = () => {
+    if (!isAdmin) {
+      setLoginOpen(true);
+      return;
+    }
+
+    if (data.records.length >= MAX_NODES) {
+      setError(
+        `La red alcanzÃ³ el lÃ­mite de ${MAX_NODES.toLocaleString('es-AR')} nodos. EliminÃ¡ un registro antes de crear otro.`
+      );
+      return;
+    }
+
+    setRecordModal('new');
+  };
+
+  const handleLoginSuccess = (session: AuthSession) => {
+    setAuthSession(session);
+    setLoginOpen(false);
+    setError(undefined);
+  };
+
+  const handleLogout = async () => {
+    try {
+      await logoutAdmin();
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setAuthSession({ authenticated: false, csrfToken: '' });
+      setLoginOpen(false);
+    }
+  };
+
+  const handleBulkImportSuccess = async (_result: BulkImportResult) => {
+    try {
+      const loadedData = await loadData();
+      setData(loadedData);
+      setSelectedId(undefined);
+      setError(undefined);
+    } catch (err) {
+      console.error(err);
+      setError(
+        'La importación se completó, pero no se pudo actualizar la vista. Volvé a intentar la carga de datos.'
       );
     }
   };
@@ -323,11 +430,18 @@ export default function App() {
         filter={filter}
         setFilter={setFilter}
         onSelect={setSelectedId}
-        onNew={() => setRecordModal('new')}
+        nodeCount={data.records.length}
+        onNew={openNewRecord}
+        onBulkImport={() => setBulkImportOpen(true)}
 
         // Reset de datos eliminado.
         // D1 es ahora la fuente de verdad.
         onReset={() => {}}
+        isAdmin={isAdmin}
+        authLoading={authLoading}
+        adminEmail={authSession.user?.email}
+        onLogin={() => setLoginOpen(true)}
+        onLogout={() => void handleLogout()}
       />
 
       <NetworkGraph
@@ -336,6 +450,7 @@ export default function App() {
         selectedId={selectedId}
         onSelect={handleGraphSelect}
         onClear={clearGraphSelection}
+        canEdit={isAdmin}
       />
 
       <DetailsPanel
@@ -353,6 +468,7 @@ export default function App() {
           setRelationModal(true)
         }
         onDeleteRelation={removeRel}
+        isAdmin={isAdmin}
       />
 
       {recordModal && (
@@ -378,6 +494,21 @@ export default function App() {
             setRelationModal(false)
           }
           onSave={saveRel}
+        />
+      )}
+
+      {bulkImportOpen && (
+        <BulkImportModal
+          existingNodeCount={data.records.length}
+          onClose={() => setBulkImportOpen(false)}
+          onImportSuccess={handleBulkImportSuccess}
+        />
+      )}
+
+      {loginOpen && (
+        <LoginModal
+          onClose={() => setLoginOpen(false)}
+          onSuccess={handleLoginSuccess}
         />
       )}
     </main>

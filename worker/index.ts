@@ -1,5 +1,11 @@
+import { handleBulkImport } from './import';
+import { handleAuthRequest, requireAdminRequest } from './auth';
+import { MAX_NODES } from '../src/lib/nodeLimits';
+
 interface Env {
   DB: D1Database;
+  ADMIN_BOOTSTRAP_TOKEN?: string;
+  IMPORT_ENABLED?: string;
 }
 
 interface ContactRecord {
@@ -27,11 +33,63 @@ interface NodePosition {
 const json = (data: unknown, status = 200) =>
   Response.json(data, { status });
 
+async function countRecords(db: D1Database) {
+  const result = await db
+    .prepare('SELECT COUNT(*) AS count FROM records')
+    .first<{ count: number }>();
+
+  return Number(result?.count ?? 0);
+}
+
+function isNodeLimitError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /MAX_NODES_EXCEEDED/i.test(message);
+}
+
+function nodeLimitResponse(existingNodes: number) {
+  return json(
+    {
+      error: 'node_limit_exceeded',
+      message: `La red ya alcanzÃ³ el lÃ­mite de ${MAX_NODES.toLocaleString('es-AR')} nodos.`,
+      details: {
+        maxNodes: MAX_NODES,
+        existingNodes,
+        requestedNodes: 1,
+        availableNodes: Math.max(MAX_NODES - existingNodes, 0),
+      },
+    },
+    409
+  );
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
     try {
+      const authResponse = await handleAuthRequest(request, env);
+      if (authResponse) {
+        return authResponse;
+      }
+
+      const isWriteRequest = !['GET', 'HEAD', 'OPTIONS'].includes(
+        request.method.toUpperCase()
+      );
+
+      if (isWriteRequest) {
+        const authorizationResponse = await requireAdminRequest(request, env);
+        if (authorizationResponse) {
+          return authorizationResponse;
+        }
+      }
+
+      if (
+        request.method === 'POST' &&
+        url.pathname === '/api/admin/import'
+      ) {
+        return await handleBulkImport(request, env);
+      }
+
       // ==========================================
       // RECORDS
       // ==========================================
@@ -81,27 +139,40 @@ export default {
           );
         }
 
-        await env.DB
-          .prepare(`
-            INSERT INTO records (
-              id,
-              name,
-              description,
-              email,
-              location,
-              type
+        const existingNodes = await countRecords(env.DB);
+        if (existingNodes >= MAX_NODES) {
+          return nodeLimitResponse(existingNodes);
+        }
+
+        try {
+          await env.DB
+            .prepare(`
+              INSERT INTO records (
+                id,
+                name,
+                description,
+                email,
+                location,
+                type
+              )
+              VALUES (?, ?, ?, ?, ?, ?)
+            `)
+            .bind(
+              body.id,
+              body.name,
+              body.description ?? '',
+              body.email ?? null,
+              body.location ?? null,
+              body.type
             )
-            VALUES (?, ?, ?, ?, ?, ?)
-          `)
-          .bind(
-            body.id,
-            body.name,
-            body.description ?? '',
-            body.email ?? null,
-            body.location ?? null,
-            body.type
-          )
-          .run();
+            .run();
+        } catch (error) {
+          if (isNodeLimitError(error)) {
+            return nodeLimitResponse(existingNodes);
+          }
+
+          throw error;
+        }
 
         return json(body, 201);
       }

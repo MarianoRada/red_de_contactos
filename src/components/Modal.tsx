@@ -6,6 +6,7 @@ type ModalProps = {
   onClose: () => void;
   children: ReactNode;
   className?: string;
+  closeDisabled?: boolean;
 };
 
 export default function Modal({
@@ -13,13 +14,14 @@ export default function Modal({
   onClose,
   children,
   className = '',
+  closeDisabled = false,
 }: ModalProps) {
   return (
     <div
       className="modal-backdrop"
       role="presentation"
       onMouseDown={(event) =>
-        event.target === event.currentTarget && onClose()
+        event.target === event.currentTarget && !closeDisabled && onClose()
       }
     >
       <section
@@ -30,7 +32,12 @@ export default function Modal({
       >
         <header>
           <h2>{title}</h2>
-          <button className="icon-btn" onClick={onClose} aria-label="Cerrar">
+          <button
+            className="icon-btn"
+            onClick={onClose}
+            aria-label="Cerrar"
+            disabled={closeDisabled}
+          >
             <X size={19} />
           </button>
         </header>

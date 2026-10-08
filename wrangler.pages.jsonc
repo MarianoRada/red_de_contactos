@@ -1,0 +1,12 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "red-contactos",
+  "pages_build_output_dir": "./dist",
+  "compatibility_date": "2026-10-07",
+  "services": [
+    {
+      "binding": "RED_CONTACTOS_WORKER",
+      "service": "red-contactos"
+    }
+  ]
+}

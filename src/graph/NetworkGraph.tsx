@@ -1005,6 +1005,7 @@ type NetworkGraphProps = {
   selectedId?: string;
   onSelect: (id: string) => void;
   onClear: () => void;
+  canEdit: boolean;
 };
 
 /*
@@ -1018,6 +1019,7 @@ function NetworkGraph({
   selectedId,
   onSelect,
   onClear,
+  canEdit,
 }: NetworkGraphProps) {
   const renderMeasureId = import.meta.env.DEV
     ? `${++performanceMeasureId}`
@@ -1238,8 +1240,12 @@ function NetworkGraph({
   ]);
 
   useEffect(() => {
+    if (!canEdit) {
+      return;
+    }
+
     saveNodePositions(customPositionsByView);
-  }, [customPositionsByView]);
+  }, [canEdit, customPositionsByView]);
 
   /*
    * ============================================================
@@ -1683,6 +1689,10 @@ function NetworkGraph({
         event.clientY,
         zoomDirection === 'in' ? 1.35 : 0.74
       );
+      return;
+    }
+
+    if (!canEdit) {
       return;
     }
 
