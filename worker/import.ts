@@ -18,7 +18,7 @@ type ImportIssue = {
 };
 
 type ImportRecordInput = {
-  record_key: unknown;
+  record_key?: unknown;
   id?: unknown;
   name: unknown;
   description?: unknown;
@@ -28,9 +28,11 @@ type ImportRecordInput = {
 };
 
 type ImportRelationshipInput = {
-  relationship_key: unknown;
-  source_ref: unknown;
-  target_ref: unknown;
+  relationship_key?: unknown;
+  source?: unknown;
+  target?: unknown;
+  source_ref?: unknown;
+  target_ref?: unknown;
   type: unknown;
 };
 
@@ -55,6 +57,11 @@ type PendingExistingReference = {
   id: string;
   row: number;
   column: 'source_ref' | 'target_ref';
+};
+
+type ExistingRecordReference = {
+  id: string;
+  name: string;
 };
 
 type ImportPayload = {
@@ -269,6 +276,10 @@ function serializedBytes(value: unknown) {
   return new TextEncoder().encode(JSON.stringify(value)).byteLength;
 }
 
+function normalizedName(value: string) {
+  return value.trim().toLocaleLowerCase('es-AR');
+}
+
 function normalizePayload(
   value: unknown,
   issues: ImportIssue[]
@@ -299,8 +310,8 @@ function normalizePayload(
   const records = Array.isArray(value.records) ? value.records : [];
   const relationships = Array.isArray(value.relationships) ? value.relationships : [];
 
-  if (records.length === 0) {
-    addIssue(issues, 'empty_records', 'La importación debe contener al menos un registro.');
+  if (records.length === 0 && relationships.length === 0) {
+    addIssue(issues, 'empty_import', 'La importación debe contener registros o relaciones.');
   }
 
   if (records.length > MAX_RECORDS) {
@@ -357,7 +368,6 @@ function prepareRecords(
       field: 'record_key',
       row,
       issues,
-      required: true,
       maxLength: MAX_LENGTHS.recordKey,
     });
     const requestedId = readText(value.id, {
@@ -403,12 +413,14 @@ function prepareRecords(
       maxLength: MAX_LENGTHS.relationshipType,
     });
 
-    if (recordKey) {
-      const previous = recordKeys.get(recordKey);
+    const resolvedRecordKey = recordKey || `__import_record_${row}`;
+
+    if (resolvedRecordKey) {
+      const previous = recordKeys.get(resolvedRecordKey);
       if (previous) {
         addIssue(issues, 'duplicate_record_key', `record_key repetido; también aparece en la fila ${previous}.`, row, 'record_key');
       } else {
-        recordKeys.set(recordKey, row);
+        recordKeys.set(resolvedRecordKey, row);
       }
     }
 
@@ -428,7 +440,7 @@ function prepareRecords(
     }
 
     prepared.push({
-      record_key: recordKey,
+      record_key: resolvedRecordKey,
       requestedId,
       name,
       description,
@@ -560,6 +572,185 @@ function prepareRelationships(
   });
 
   return { prepared, pendingExistingIds, pendingExistingReferences };
+}
+
+async function existingRecordReferences(db: D1Database) {
+  const { results } = await db
+    .prepare('SELECT id, name FROM records')
+    .all<ExistingRecordReference>();
+
+  return results;
+}
+
+function prepareRelationshipsByName(
+  relationships: ImportRelationshipInput[],
+  recordKeyToId: Map<string, string>,
+  recordKeyToName: Map<string, string>,
+  existingRecords: ExistingRecordReference[],
+  issues: ImportIssue[]
+) {
+  const relationshipKeys = new Map<string, number>();
+  const relationshipSignatures = new Map<string, number>();
+  const prepared: PreparedRelationship[] = [];
+
+  const existingById = new Map(existingRecords.map((record) => [record.id, record]));
+  const candidatesByName = new Map<string, Array<{ ref: string; id: string; name: string }>>();
+
+  const addCandidate = (candidate: { ref: string; id: string; name: string }) => {
+    const key = normalizedName(candidate.name);
+    const candidates = candidatesByName.get(key) ?? [];
+    candidates.push(candidate);
+    candidatesByName.set(key, candidates);
+  };
+
+  recordKeyToId.forEach((id, recordKey) => {
+    addCandidate({ ref: recordKey, id, name: recordKeyToName.get(recordKey) ?? '' });
+  });
+  existingRecords.forEach((record) => {
+    addCandidate({ ref: `id:${record.id}`, id: record.id, name: record.name });
+  });
+
+  relationships.forEach((value, index) => {
+    const row = index + 2;
+
+    if (!isPlainObject(value)) {
+      addIssue(issues, 'invalid_row', 'Cada relación debe ser un objeto JSON.', row);
+      return;
+    }
+
+    const isLegacy = value.source === undefined && value.target === undefined;
+    checkAllowedKeys(
+      value,
+      isLegacy
+        ? ['relationship_key', 'source_ref', 'target_ref', 'type']
+        : ['relationship_key', 'source', 'target', 'source_ref', 'target_ref', 'type'],
+      issues,
+      row
+    );
+
+    const relationshipKey = readText(value.relationship_key, {
+      field: 'relationship_key',
+      row,
+      issues,
+      required: isLegacy,
+      maxLength: MAX_LENGTHS.relationshipKey,
+      nullable: true,
+    });
+    const sourceName = readText(isLegacy ? value.source_ref : value.source, {
+      field: isLegacy ? 'source_ref' : 'source',
+      row,
+      issues,
+      required: true,
+      maxLength: isLegacy ? MAX_LENGTHS.reference : MAX_LENGTHS.name,
+    });
+    const targetName = readText(isLegacy ? value.target_ref : value.target, {
+      field: isLegacy ? 'target_ref' : 'target',
+      row,
+      issues,
+      required: true,
+      maxLength: isLegacy ? MAX_LENGTHS.reference : MAX_LENGTHS.name,
+    });
+    const selectedSource = readText(value.source_ref, {
+      field: 'source_ref',
+      row,
+      issues,
+      maxLength: MAX_LENGTHS.reference,
+      nullable: true,
+    });
+    const selectedTarget = readText(value.target_ref, {
+      field: 'target_ref',
+      row,
+      issues,
+      maxLength: MAX_LENGTHS.reference,
+      nullable: true,
+    });
+    const type = readText(value.type, {
+      field: 'type',
+      row,
+      issues,
+      required: true,
+      maxLength: MAX_LENGTHS.relationshipType,
+    });
+
+    const resolveReference = (name: string, selectedRef: string, column: string) => {
+      if (isLegacy) {
+        if (selectedRef.startsWith('id:')) {
+          const existing = existingById.get(selectedRef.slice(3));
+          if (!existing) {
+            addIssue(issues, 'missing_reference', `El registro existente "${selectedRef.slice(3)}" no fue encontrado en D1.`, row, column);
+            return '';
+          }
+          return existing.id;
+        }
+
+        const id = recordKeyToId.get(selectedRef);
+        if (!id) {
+          addIssue(issues, 'missing_reference', `La referencia "${selectedRef}" no existe en los registros de esta importación.`, row, column);
+        }
+        return id ?? '';
+      }
+
+      const candidates = candidatesByName.get(normalizedName(name)) ?? [];
+      const selected = selectedRef
+        ? candidates.find((candidate) => candidate.ref === selectedRef)
+        : undefined;
+
+      if (selectedRef && !selected) {
+        addIssue(issues, 'reference_name_mismatch', `La selección de "${name}" no corresponde a un contacto con ese nombre.`, row, column);
+        return '';
+      }
+
+      if (selected) {
+        return selected.id;
+      }
+
+      if (candidates.length === 0) {
+        addIssue(issues, 'missing_reference', `No existe un contacto llamado "${name}".`, row, column);
+        return '';
+      }
+
+      if (candidates.length > 1) {
+        addIssue(issues, 'ambiguous_reference', `El nombre "${name}" coincide con varios contactos; seleccioná uno explícitamente.`, row, column);
+        return '';
+      }
+
+      return candidates[0].id;
+    };
+
+    const sourceId = resolveReference(sourceName, selectedSource, 'source_ref');
+    const targetId = resolveReference(targetName, selectedTarget, 'target_ref');
+
+    if (sourceId && targetId && sourceId === targetId) {
+      addIssue(issues, 'self_relationship', 'Una relación no puede apuntar al mismo registro en ambos extremos.', row);
+    }
+
+    const relationshipId = relationshipKey || crypto.randomUUID();
+    const previousKey = relationshipKeys.get(relationshipId);
+    if (previousKey) {
+      addIssue(issues, 'duplicate_relationship_key', `La relación se repite; también aparece en la fila ${previousKey}.`, row, 'relationship_key');
+    } else {
+      relationshipKeys.set(relationshipId, row);
+    }
+
+    if (sourceId && targetId && RELATIONSHIP_TYPES.has(type)) {
+      const signature = `${sourceId}\u0000${targetId}\u0000${type}`;
+      const previous = relationshipSignatures.get(signature);
+      if (previous) {
+        addIssue(issues, 'duplicate_relationship', `La relación ya aparece en la fila ${previous}.`, row);
+      } else {
+        relationshipSignatures.set(signature, row);
+      }
+    }
+
+    prepared.push({
+      relationship_key: relationshipId,
+      source_id: sourceId,
+      target_id: targetId,
+      type: type as RelationshipType,
+    });
+  });
+
+  return { prepared };
 }
 
 async function existingIds(
@@ -722,6 +913,7 @@ async function handleImport(request: Request, env: ImportEnv) {
 
   const generatedIds = new Set<string>();
   const recordKeyToId = new Map<string, string>();
+  const recordKeyToName = new Map<string, string>();
   const preparedRecords: PreparedRecord[] = recordPreparation.prepared.map((record) => {
     let id = record.requestedId;
 
@@ -733,6 +925,7 @@ async function handleImport(request: Request, env: ImportEnv) {
 
     generatedIds.add(id);
     recordKeyToId.set(record.record_key, id);
+    recordKeyToName.set(record.record_key, record.name);
 
     return {
       record_key: record.record_key,
@@ -745,9 +938,12 @@ async function handleImport(request: Request, env: ImportEnv) {
     };
   });
 
-  const relationshipPreparation = prepareRelationships(
+  const existingRecords = await existingRecordReferences(env.DB);
+  const relationshipPreparation = prepareRelationshipsByName(
     payload.relationships,
     recordKeyToId,
+    recordKeyToName,
+    existingRecords,
     issues
   );
 
@@ -765,25 +961,6 @@ async function handleImport(request: Request, env: ImportEnv) {
     'relationships',
     relationshipIds
   );
-  const existingReferenceIds = await existingIds(
-    env.DB,
-    'records',
-    [...relationshipPreparation.pendingExistingIds]
-  );
-  const existingReferenceIdSet = new Set(existingReferenceIds);
-
-  relationshipPreparation.pendingExistingReferences.forEach((reference) => {
-    if (!existingReferenceIdSet.has(reference.id)) {
-      addIssue(
-        issues,
-        'missing_reference',
-        `El registro existente "${reference.id}" no fue encontrado en D1.`,
-        reference.row,
-        reference.column
-      );
-    }
-  });
-
   existingRecordIds.forEach((id) => {
     const row = preparedRecords.findIndex((record) => record.id === id) + 2;
     addIssue(issues, 'record_conflict', `El registro con ID "${id}" ya existe en D1.`, row, 'id');

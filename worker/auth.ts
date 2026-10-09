@@ -1,6 +1,7 @@
 export interface AuthEnv {
   DB: D1Database;
   ADMIN_BOOTSTRAP_TOKEN?: string;
+  ADMIN_PASSWORD_RESET_TOKEN?: string;
 }
 
 type AuthUserRow = {
@@ -777,6 +778,87 @@ async function bootstrapAdmin(request: Request, env: AuthEnv) {
   );
 }
 
+async function resetAdminPassword(request: Request, env: AuthEnv) {
+  if (!env.ADMIN_PASSWORD_RESET_TOKEN) {
+    return json({ error: 'not_found', message: 'Not found' }, 404);
+  }
+
+  const suppliedToken = request.headers.get('X-Admin-Password-Reset-Token') ?? '';
+  const expectedHash = await sha256(env.ADMIN_PASSWORD_RESET_TOKEN);
+  const suppliedHash = await sha256(suppliedToken);
+
+  if (!(await timingSafeStringEqual(suppliedHash, expectedHash))) {
+    return json(
+      { error: 'reset_forbidden', message: 'Operación no autorizada.' },
+      403
+    );
+  }
+
+  let body: LoginBody;
+  try {
+    body = await request.json<LoginBody>();
+  } catch {
+    return json({ error: 'invalid_json', message: 'JSON inválido.' }, 400);
+  }
+
+  const email = normalizeEmail(body.email);
+  if (!validEmail(email) || !validPassword(body.password)) {
+    return json(
+      {
+        error: 'invalid_admin_data',
+        message: `El email debe ser válido y la contraseña debe tener al menos ${MIN_PASSWORD_LENGTH} caracteres.`,
+      },
+      422
+    );
+  }
+
+  const user = await env.DB
+    .prepare('SELECT id FROM admin_users WHERE email = ? AND is_active = 1')
+    .bind(email)
+    .first<{ id: string }>();
+
+  if (!user) {
+    return json(
+      { error: 'admin_not_found', message: 'No existe un administrador activo con ese email.' },
+      404
+    );
+  }
+
+  const passwordRecord = await createPasswordRecord(body.password);
+  await env.DB.batch([
+    env.DB
+      .prepare(`
+        UPDATE admin_users
+        SET
+          password_hash = ?,
+          password_salt = ?,
+          password_iterations = ?,
+          password_algorithm = ?,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `)
+      .bind(
+        passwordRecord.hash,
+        passwordRecord.salt,
+        passwordRecord.iterations,
+        passwordRecord.algorithm,
+        user.id
+      ),
+    env.DB
+      .prepare(`
+        UPDATE admin_sessions
+        SET revoked_at = CURRENT_TIMESTAMP
+        WHERE admin_user_id = ? AND revoked_at IS NULL
+      `)
+      .bind(user.id),
+  ]);
+
+  return json({
+    success: true,
+    message: 'Contraseña actualizada. Las sesiones anteriores fueron revocadas.',
+  });
+}
+
 export async function handleAuthRequest(
   request: Request,
   env: AuthEnv
@@ -797,6 +879,10 @@ export async function handleAuthRequest(
 
   if (request.method === 'POST' && pathname === '/api/auth/bootstrap') {
     return bootstrapAdmin(request, env);
+  }
+
+  if (request.method === 'POST' && pathname === '/api/auth/reset-password') {
+    return resetAdminPassword(request, env);
   }
 
   return undefined;

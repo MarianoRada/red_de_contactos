@@ -103,9 +103,11 @@ export type BulkImportRecordPayload = {
 };
 
 export type BulkImportRelationshipPayload = {
-  relationship_key: string;
-  source_ref: string;
-  target_ref: string;
+  relationship_key?: string;
+  source?: string;
+  target?: string;
+  source_ref?: string;
+  target_ref?: string;
   type: RelationshipType;
 };
 

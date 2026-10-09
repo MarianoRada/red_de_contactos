@@ -500,6 +500,8 @@ export default function App() {
       {bulkImportOpen && (
         <BulkImportModal
           existingNodeCount={data.records.length}
+          existingRecords={data.records}
+          existingRelationships={data.relationships}
           onClose={() => setBulkImportOpen(false)}
           onImportSuccess={handleBulkImportSuccess}
         />

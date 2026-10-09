@@ -5,6 +5,7 @@ import { MAX_NODES } from '../src/lib/nodeLimits';
 interface Env {
   DB: D1Database;
   ADMIN_BOOTSTRAP_TOKEN?: string;
+  ADMIN_PASSWORD_RESET_TOKEN?: string;
   IMPORT_ENABLED?: string;
 }
 

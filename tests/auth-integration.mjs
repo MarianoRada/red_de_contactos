@@ -11,8 +11,10 @@ const node = process.execPath;
 const port = 8790 + Math.floor(Math.random() * 100);
 const persistDirectory = await mkdtemp(join(tmpdir(), 'red-contactos-auth-'));
 const token = randomBytes(32).toString('base64url');
+const resetToken = randomBytes(32).toString('base64url');
 const email = `admin-${randomBytes(8).toString('hex')}@example.test`;
 const password = randomBytes(24).toString('base64url');
+const resetPassword = randomBytes(24).toString('base64url');
 
 function run(args) {
   return new Promise((resolve, reject) => {
@@ -43,6 +45,7 @@ function startWorker() {
     '--persist-to', persistDirectory,
     '--port', String(port),
     '--var', `ADMIN_BOOTSTRAP_TOKEN:${token}`,
+    '--var', `ADMIN_PASSWORD_RESET_TOKEN:${resetToken}`,
     '--show-interactive-dev-session=false',
     '--log-level', 'error',
   ], {
@@ -153,7 +156,36 @@ try {
   assert(loginResponse.status === 200, `Login failed with ${loginResponse.status}.`);
   assert(loginBody.authenticated === true, 'Login did not authenticate the administrator.');
 
-  console.log('Auth integration passed: bootstrap and login completed in wrangler dev.');
+  const resetResponse = await fetch(`http://127.0.0.1:${port}/api/auth/reset-password`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Admin-Password-Reset-Token': resetToken,
+    },
+    body: JSON.stringify({ email, password: resetPassword }),
+  });
+  assert(resetResponse.status === 200, `Password reset failed with ${resetResponse.status}.`);
+
+  const resetSessionResponse = await fetch(`http://127.0.0.1:${port}/api/auth/session`);
+  const resetSessionBody = await resetSessionResponse.json();
+  const resetCsrfToken = resetSessionBody.csrfToken;
+  const resetCsrfCookie = cookieValue(
+    resetSessionResponse.headers.get('set-cookie') ?? '',
+    'rc_csrf'
+  );
+  const resetLoginResponse = await fetch(`http://127.0.0.1:${port}/api/auth/login`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Origin: `http://127.0.0.1:${port}`,
+      Cookie: `rc_csrf=${resetCsrfCookie}`,
+      'X-CSRF-Token': resetCsrfToken,
+    },
+    body: JSON.stringify({ email, password: resetPassword }),
+  });
+  assert(resetLoginResponse.status === 200, `Login after reset failed with ${resetLoginResponse.status}.`);
+
+  console.log('Auth integration passed: bootstrap, login, reset, and login after reset completed in wrangler dev.');
 } catch (error) {
   const details = error instanceof Error ? error.message : String(error);
   throw new Error(`${details}\nWorker output:\n${worker.getOutput()}`);

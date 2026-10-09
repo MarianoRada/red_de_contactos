@@ -50,5 +50,7 @@ Para probar el flujo completo en el runtime local compatible con Workers:
 npm run test:auth
 ```
 
+Para un reseteo excepcional, configurá temporalmente el secreto `ADMIN_PASSWORD_RESET_TOKEN`, desplegá solo el Worker y llamá al endpoint `POST /api/auth/reset-password` con los headers `X-Admin-Password-Reset-Token` y `Content-Type: application/json`, enviando `{ "email": "...", "password": "..." }`. El endpoint usa el mismo hash compatible con Workers y revoca las sesiones existentes. Eliminá el secreto temporal después del uso.
+
 ## Variante visual oscura
 Esta versión adapta la interfaz a una visualización de red inmersiva: mapa a pantalla completa, nodos luminosos, conexiones atenuadas y paneles flotantes oscuros. La lógica de registros, relaciones y localStorage se mantiene.

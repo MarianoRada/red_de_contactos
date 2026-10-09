@@ -910,6 +910,12 @@ button {
   background: #11171c;
 }
 
+.bulk-template-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
 .bulk-dropzone strong {
   color: #e1e7ec;
   font-size: 14px;
@@ -1092,6 +1098,65 @@ button {
 
 .bulk-validation-notes code {
   color: #ead09a;
+}
+
+.bulk-resolution-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid #4c4930;
+  border-radius: 8px;
+  background: #17150d;
+  padding: 10px 11px;
+  color: #d8c58d;
+  font-size: 11px;
+}
+
+.bulk-resolution-panel > strong {
+  color: #f0dda0;
+  font-size: 12px;
+}
+
+.bulk-resolution-panel > p {
+  margin: 0;
+}
+
+.bulk-resolution-row {
+  display: grid;
+  grid-template-columns: auto repeat(2, minmax(0, 1fr));
+  align-items: end;
+  gap: 8px;
+  border-top: 1px solid #3a3422;
+  padding-top: 8px;
+}
+
+.bulk-resolution-row strong {
+  color: #d8c58d;
+  white-space: nowrap;
+}
+
+.bulk-resolution-row p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: #d99a9a;
+}
+
+.bulk-resolution-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: #bcae7e;
+  font-size: 10px;
+}
+
+.bulk-resolution-field select {
+  min-width: 0;
+  border: 1px solid #554b2d;
+  border-radius: 5px;
+  background: #0e100d;
+  color: #dce4d0;
+  padding: 6px 7px;
+  font: inherit;
 }
 
 .bulk-global-issues {

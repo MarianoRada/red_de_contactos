@@ -31,7 +31,9 @@ export function detectCsvFileKind(headers: string[]): BulkImportFileKind | undef
   if (
     normalized.has('relationship_key') ||
     normalized.has('source_ref') ||
-    normalized.has('target_ref')
+    normalized.has('target_ref') ||
+    normalized.has('source') ||
+    normalized.has('target')
   ) {
     return 'relationships';
   }
