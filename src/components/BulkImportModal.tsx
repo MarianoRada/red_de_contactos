@@ -3,6 +3,7 @@ import type { ChangeEvent, DragEvent } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
   FileText,
   RefreshCw,
   Upload,
@@ -16,15 +17,15 @@ import {
   parseCsvFile,
 } from '../lib/csv';
 import {
-  CONTACT_HEADERS,
-  RELATIONSHIP_HEADERS,
   validateBulkImport,
 } from '../lib/bulkImportValidation';
+import {
+  consolidateBlockingErrors,
+} from '../lib/bulkImportCounters';
 import type {
   BulkImportFileKind,
   BulkImportPayload,
   BulkImportResult,
-  ImportIssue,
   ImportPreviewRow,
   ParsedCsvFile,
 } from '../lib/bulkImportTypes';
@@ -35,10 +36,9 @@ type BulkImportModalProps = {
   existingRecords: ContactRecord[];
   existingRelationships: Relationship[];
   onClose: () => void;
-  onImportSuccess: (result: BulkImportResult) => Promise<void> | void;
+  onImportSuccess: (result: BulkImportResult) => Promise<boolean | void> | boolean | void;
 };
 
-type PreviewFilter = 'all' | 'errors' | 'warnings';
 type ModalStatus = 'idle' | 'reading' | 'ready' | 'submitting' | 'success' | 'error';
 type ServerIssue = {
   code?: string;
@@ -46,8 +46,6 @@ type ServerIssue = {
   row?: number;
   column?: string;
 };
-
-const PAGE_SIZE = 25;
 
 type ResolutionCandidate = {
   ref: string;
@@ -64,6 +62,8 @@ type RelationshipResolution = {
   targetCandidates: ResolutionCandidate[];
   sourceRef: string;
   targetRef: string;
+  diagnosticSourceRef: string;
+  diagnosticTargetRef: string;
   issues: string[];
 };
 
@@ -81,32 +81,6 @@ function sourceRefIsExisting(ref: string) {
 
 function isLegacyRow(row: ImportPreviewRow) {
   return row.values.__legacy === 'true';
-}
-
-function previewHeaders(kind: BulkImportFileKind, file: ParsedCsvFile | undefined) {
-  if (file) {
-    return file.headers;
-  }
-
-  return kind === 'records'
-    ? CONTACT_HEADERS
-    : RELATIONSHIP_HEADERS;
-}
-
-function canonicalPreviewColumn(kind: BulkImportFileKind, column: string) {
-  if (kind === 'relationships' && column === 'source') {
-    return 'source_ref';
-  }
-
-  if (kind === 'relationships' && column === 'target') {
-    return 'target_ref';
-  }
-
-  return column;
-}
-
-function previewValue(row: ImportPreviewRow, column: string) {
-  return row.values[canonicalPreviewColumn(row.fileKind, column)] ?? row.values[column] ?? '';
 }
 
 function templateDownload(filename: string, contents: string) {
@@ -143,15 +117,43 @@ function serverIssuesFrom(error: unknown): ServerIssue[] {
   );
 }
 
-function serverIssueLabel(issue: ServerIssue) {
-  const location = [
-    issue.row ? `fila ${issue.row}` : '',
-    issue.column ? `columna ${issue.column}` : '',
-  ]
-    .filter(Boolean)
-    .join(' · ');
+function serverIssueKind(issue: ServerIssue): BulkImportFileKind | undefined {
+  if (issue.code?.startsWith('record_') || issue.code === 'duplicate_record_name') {
+    return 'records';
+  }
 
-  return location ? `${location}: ${issue.message}` : issue.message;
+  if (
+    issue.code?.startsWith('relationship_') ||
+    issue.code?.includes('reference') ||
+    issue.code?.includes('self')
+  ) {
+    return 'relationships';
+  }
+
+  return undefined;
+}
+
+type DisplayedError = {
+  row?: number;
+  message: string;
+};
+
+function uniqueDisplayedErrors(errors: DisplayedError[]) {
+  const seen = new Set<string>();
+
+  return errors.filter((error) => {
+    const key = `${error.row ?? ''}:${error.message}`;
+    if (seen.has(key)) {
+      return false;
+    }
+
+    seen.add(key);
+    return true;
+  });
+}
+
+function displayedErrorText(error: DisplayedError) {
+  return error.row ? `Fila ${error.row}: ${error.message}` : error.message;
 }
 
 export default function BulkImportModal({
@@ -168,9 +170,8 @@ export default function BulkImportModal({
   const [importError, setImportError] = useState<string>();
   const [serverIssues, setServerIssues] = useState<ServerIssue[]>([]);
   const [lastResult, setLastResult] = useState<BulkImportResult>();
-  const [previewFilter, setPreviewFilter] = useState<PreviewFilter>('all');
-  const [page, setPage] = useState(1);
-  const [relationshipSelections, setRelationshipSelections] = useState<Record<string, string>>({});
+  const [contactErrorsExpanded, setContactErrorsExpanded] = useState(false);
+  const [relationshipErrorsExpanded, setRelationshipErrorsExpanded] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const importSessionRef = useRef<{ signature: string; importId: string }>();
 
@@ -217,6 +218,23 @@ export default function BulkImportModal({
     return grouped;
   }, [existingCandidates, newCandidates]);
 
+  const duplicateImportedNames = useMemo(() => {
+    const counts = new Map<string, number>();
+
+    validation.rows
+      .filter((row) => row.fileKind === 'records' && row.values.name)
+      .forEach((row) => {
+        const key = normalizedName(row.values.name);
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+      });
+
+    return new Set(
+      [...counts.entries()]
+        .filter(([, count]) => count > 1)
+        .map(([key]) => key)
+    );
+  }, [validation.rows]);
+
   const relationshipResolutions = useMemo<RelationshipResolution[]>(() => {
     const resolutions = validation.rows
       .filter((row) => row.fileKind === 'relationships')
@@ -239,44 +257,86 @@ export default function BulkImportModal({
             targetCandidates: [],
             sourceRef,
             targetRef,
+            diagnosticSourceRef: sourceRef,
+            diagnosticTargetRef: targetRef,
             issues,
           };
         }
 
         const sourceCandidates = candidatesByName.get(normalizedName(sourceName)) ?? [];
         const targetCandidates = candidatesByName.get(normalizedName(targetName)) ?? [];
-        const sourceKey = `${row.rowNumber}:source`;
-        const targetKey = `${row.rowNumber}:target`;
-        const sourceRef = relationshipSelections[sourceKey] ?? (sourceCandidates.length === 1 ? sourceCandidates[0].ref : '');
-        const targetRef = relationshipSelections[targetKey] ?? (targetCandidates.length === 1 ? targetCandidates[0].ref : '');
+        const sourceRef = sourceCandidates.length === 1 ? sourceCandidates[0].ref : '';
+        const targetRef = targetCandidates.length === 1 ? targetCandidates[0].ref : '';
         const issues: string[] = [];
+        const sourceConflictsWithExisting = existingRecords.some(
+          (record) => normalizedName(record.name) === normalizedName(sourceName)
+        ) && validation.rows.some(
+          (currentRow) =>
+            currentRow.fileKind === 'records' &&
+            normalizedName(currentRow.values.name ?? '') === normalizedName(sourceName)
+        );
+        const targetConflictsWithExisting = existingRecords.some(
+          (record) => normalizedName(record.name) === normalizedName(targetName)
+        ) && validation.rows.some(
+          (currentRow) =>
+            currentRow.fileKind === 'records' &&
+            normalizedName(currentRow.values.name ?? '') === normalizedName(targetName)
+        );
+        const sourceExistingCandidates = sourceCandidates.filter((candidate) => candidate.kind === 'existing');
+        const targetExistingCandidates = targetCandidates.filter((candidate) => candidate.kind === 'existing');
+        const sourceImportedCandidates = sourceCandidates.filter((candidate) => candidate.kind === 'new');
+        const targetImportedCandidates = targetCandidates.filter((candidate) => candidate.kind === 'new');
+        const diagnosticSourceRef = sourceRef || (
+          sourceConflictsWithExisting &&
+          sourceExistingCandidates.length === 1 &&
+          sourceImportedCandidates.length === 1
+            ? sourceExistingCandidates[0].ref
+            : ''
+        );
+        const diagnosticTargetRef = targetRef || (
+          targetConflictsWithExisting &&
+          targetExistingCandidates.length === 1 &&
+          targetImportedCandidates.length === 1
+            ? targetExistingCandidates[0].ref
+            : ''
+        );
 
         if (sourceName && sourceCandidates.length === 0) {
           issues.push(`No existe un contacto llamado "${sourceName}".`);
-        } else if (sourceCandidates.length > 1 && !sourceRef) {
-          issues.push(`Hay varias coincidencias para el origen "${sourceName}".`);
+        } else if (
+          sourceCandidates.length > 1 &&
+          !sourceRef &&
+          !duplicateImportedNames.has(normalizedName(sourceName)) &&
+          !sourceConflictsWithExisting
+        ) {
+          issues.push(`El nombre "${sourceName}" está duplicado en D1.`);
         }
 
         if (targetName && targetCandidates.length === 0) {
           issues.push(`No existe un contacto llamado "${targetName}".`);
-        } else if (targetCandidates.length > 1 && !targetRef) {
-          issues.push(`Hay varias coincidencias para el destino "${targetName}".`);
+        } else if (
+          targetCandidates.length > 1 &&
+          !targetRef &&
+          !duplicateImportedNames.has(normalizedName(targetName)) &&
+          !targetConflictsWithExisting
+        ) {
+          issues.push(`El nombre "${targetName}" está duplicado en D1.`);
         }
 
         if (sourceRef && targetRef && sourceRef === targetRef) {
           issues.push('Una relación no puede apuntar al mismo contacto en ambos extremos.');
         }
 
-        if (sourceRefIsExisting(sourceRef) && sourceRefIsExisting(targetRef)) {
+        if (sourceRefIsExisting(diagnosticSourceRef) && sourceRefIsExisting(diagnosticTargetRef)) {
           const duplicateInDatabase = existingRelationships.some(
             (relationship) =>
-              relationship.sourceId === sourceRef.slice(3) &&
-              relationship.targetId === targetRef.slice(3) &&
+              relationship.sourceId === diagnosticSourceRef.slice(3) &&
+              relationship.targetId === diagnosticTargetRef.slice(3) &&
               relationship.type === row.values.type
           );
 
           if (duplicateInDatabase) {
-            issues.push('Esta relación ya existe en la base de datos.');
+            issues.push('Esta relación ya existe.');
           }
         }
 
@@ -288,30 +348,26 @@ export default function BulkImportModal({
           targetCandidates,
           sourceRef,
           targetRef,
+          diagnosticSourceRef,
+          diagnosticTargetRef,
           issues,
         };
       });
 
     const seen = new Map<string, number>();
     return resolutions.map((resolution) => {
-      if (resolution.sourceRef && resolution.targetRef && resolution.row.values.type) {
-        const signature = `${resolution.sourceRef}\u0000${resolution.targetRef}\u0000${resolution.row.values.type}`;
+      if (resolution.diagnosticSourceRef && resolution.diagnosticTargetRef && resolution.row.values.type) {
+        const signature = `${resolution.diagnosticSourceRef}\u0000${resolution.diagnosticTargetRef}\u0000${resolution.row.values.type}`;
         const previous = seen.get(signature);
         if (previous) {
-          resolution.issues.push(`Esta relación está repetida; también aparece en la fila ${previous}.`);
+          resolution.issues.push(`Esta relación está repetida en el CSV (fila ${previous}).`);
         } else {
           seen.set(signature, resolution.row.rowNumber);
         }
       }
       return resolution;
     });
-  }, [candidatesByName, existingRelationships, relationshipSelections, validation.rows]);
-
-  const duplicateNameWarnings = useMemo(() => {
-    return [...candidatesByName.entries()]
-      .filter(([, candidates]) => candidates.length > 1)
-      .map(([name, candidates]) => `"${name}" tiene ${candidates.length} coincidencias; las relaciones con ese nombre requerirán selección.`);
-  }, [candidatesByName]);
+  }, [candidatesByName, duplicateImportedNames, existingRecords, existingRelationships, validation.rows]);
 
   const recordNameConflicts = useMemo(() => {
     return validation.rows
@@ -334,6 +390,19 @@ export default function BulkImportModal({
       column: message.includes('origen') || message.includes('contacto llamado') ? 'source' : undefined,
     }))
   );
+
+  const consolidatedBlockingErrors = useMemo(() => {
+    return consolidateBlockingErrors({
+      validationIssues: validation.issues,
+      recordNameConflicts,
+      resolutionIssues,
+      serverIssues: serverIssues.map((issue) => ({
+        ...issue,
+        fileKind: serverIssueKind(issue),
+      })),
+      importError,
+    });
+  }, [importError, recordNameConflicts, resolutionIssues, serverIssues, validation.issues]);
 
   const payloadData = useMemo(() => {
     const records = validation.rows
@@ -407,60 +476,20 @@ export default function BulkImportModal({
     status !== 'success' &&
     !isSubmitting &&
     validation.recordsCount + validation.relationshipsCount > 0 &&
-    validation.blockingErrorCount === 0 &&
-    recordNameConflicts.length === 0 &&
-    resolutionIssues.length === 0 &&
+    consolidatedBlockingErrors.length === 0 &&
     !overNodeLimit;
 
-  const previewRows = useMemo(() => {
-    if (previewFilter === 'errors') {
-      return validation.rows.filter((row) =>
-        row.issues.some((currentIssue) => currentIssue.severity === 'error')
-      );
-    }
-
-    if (previewFilter === 'warnings') {
-      return validation.rows.filter((row) =>
-        row.issues.some((currentIssue) => currentIssue.severity === 'warning')
-      );
-    }
-
-    return validation.rows;
-  }, [previewFilter, validation.rows]);
-
-  const pageCount = Math.max(1, Math.ceil(previewRows.length / PAGE_SIZE));
-  const visibleRows = previewRows.slice(
-    (page - 1) * PAGE_SIZE,
-    page * PAGE_SIZE
-  );
-
   useEffect(() => {
-    setPage(1);
-  }, [previewFilter, recordsFile, relationshipsFile]);
+    setContactErrorsExpanded(false);
+    setRelationshipErrorsExpanded(false);
+  }, [recordsFile, relationshipsFile]);
 
   const openFilePicker = () => {
     if (!isSubmitting) {
-      fileInputRef.current?.click();
-    }
-  };
-
-  const clearFiles = () => {
-    if (isSubmitting) {
-      return;
-    }
-
-    setRecordsFile(undefined);
-    setRelationshipsFile(undefined);
-    setFileMessage(undefined);
-    setImportError(undefined);
-    setServerIssues([]);
-    setLastResult(undefined);
-    setStatus('idle');
-    setRelationshipSelections({});
-    setPage(1);
-
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+        fileInputRef.current.click();
+      }
     }
   };
 
@@ -479,8 +508,6 @@ export default function BulkImportModal({
     setServerIssues([]);
     setLastResult(undefined);
     setStatus('ready');
-    setRelationshipSelections({});
-    setPage(1);
   };
 
   const loadFiles = async (files: File[]) => {
@@ -529,7 +556,6 @@ export default function BulkImportModal({
       setRecordsFile(nextRecordsFile);
       setRelationshipsFile(nextRelationshipsFile);
       setStatus('ready');
-      setPage(1);
 
       if (unrecognizedFiles.length > 0) {
         setFileMessage(
@@ -551,51 +577,6 @@ export default function BulkImportModal({
     void loadFiles(Array.from(event.dataTransfer.files));
   };
 
-  const updateCell = (
-    row: ImportPreviewRow,
-    column: string,
-    newValue: string
-  ) => {
-    if (isSubmitting) {
-      return;
-    }
-
-    const updateFile = (
-      file: ParsedCsvFile | undefined,
-      setFile: (nextFile: ParsedCsvFile | undefined) => void
-    ) => {
-      if (!file) {
-        return;
-      }
-
-      setFile({
-        ...file,
-        rows: file.rows.map((currentRow) =>
-          currentRow.rowNumber === row.rowNumber
-            ? {
-                ...currentRow,
-                values: {
-                  ...currentRow.values,
-                  [canonicalPreviewColumn(row.fileKind, column)]: newValue,
-                },
-              }
-            : currentRow
-        ),
-      });
-    };
-
-    if (row.fileKind === 'records') {
-      updateFile(recordsFile, setRecordsFile);
-    } else {
-      updateFile(relationshipsFile, setRelationshipsFile);
-    }
-
-    setImportError(undefined);
-    setServerIssues([]);
-    setLastResult(undefined);
-    setStatus('ready');
-  };
-
   const handleSubmit = async () => {
     if (!canSubmit) {
       return;
@@ -615,9 +596,18 @@ export default function BulkImportModal({
 
     try {
       const result = await importBulkData(payload);
-      await onImportSuccess(result);
+      const dataUpdated = await onImportSuccess(result);
+      if (dataUpdated === false) {
+        setImportError(
+          'La importación se completó, pero no se pudo actualizar la vista. Volvé a intentar la carga de datos.'
+        );
+        setStatus('error');
+        return;
+      }
+
       setLastResult(result);
       setStatus('success');
+      onClose();
     } catch (error) {
       console.error(error);
       setServerIssues(serverIssuesFrom(error));
@@ -630,16 +620,36 @@ export default function BulkImportModal({
     }
   };
 
-  const rowHasIssue = (row: ImportPreviewRow, column: string) => {
-    const canonicalColumn = canonicalPreviewColumn(row.fileKind, column);
-    return row.issues.some(
-      (currentIssue) => currentIssue.column === column || currentIssue.column === canonicalColumn
-    );
-  };
-
   const localGlobalIssues = validation.issues.filter(
     (currentIssue) => !currentIssue.rowNumber
   );
+
+  const contactErrors = uniqueDisplayedErrors([
+    ...recordNameConflicts.map((conflict) => ({
+      row: conflict.row,
+      message: `"${conflict.name}" ya existe.`,
+    })),
+    ...localGlobalIssues
+      .filter((issue) => issue.severity === 'error' && issue.fileKind === 'records')
+      .map((issue) => ({ row: issue.rowNumber, message: issue.message })),
+    ...serverIssues
+      .filter((issue) => serverIssueKind(issue) === 'records')
+      .map((issue) => ({ row: issue.row, message: issue.message })),
+  ]);
+
+  const relationshipErrors = uniqueDisplayedErrors([
+    ...resolutionIssues.map((issue) => ({ row: issue.row, message: issue.message })),
+    ...localGlobalIssues
+      .filter((issue) => issue.severity === 'error' && issue.fileKind === 'relationships')
+      .map((issue) => ({ row: issue.rowNumber, message: issue.message })),
+    ...serverIssues
+      .filter((issue) => serverIssueKind(issue) === 'relationships')
+      .map((issue) => ({ row: issue.row, message: issue.message })),
+  ]);
+
+  const unclassifiedErrors = localGlobalIssues
+    .filter((issue) => issue.severity === 'error' && !issue.fileKind)
+    .map((issue) => ({ row: issue.rowNumber, message: issue.message }));
 
   return (
     <Modal
@@ -768,7 +778,7 @@ export default function BulkImportModal({
         <div className="bulk-summary" aria-label="Resumen de validación">
           <div>
             <strong>{validation.recordsCount}</strong>
-            <span>registros</span>
+            <span>contactos</span>
           </div>
           <div>
             <strong>{validation.relationshipsCount}</strong>
@@ -776,14 +786,14 @@ export default function BulkImportModal({
           </div>
           <div className="valid">
             <strong>{validation.validRowCount}</strong>
-            <span>filas válidas</span>
+            <span>filas con formato válido</span>
           </div>
           <div className="warning">
             <strong>{validation.warningCount}</strong>
             <span>advertencias</span>
           </div>
           <div className="invalid">
-            <strong>{validation.blockingErrorCount}</strong>
+            <strong>{consolidatedBlockingErrors.length}</strong>
             <span>errores</span>
           </div>
         </div>
@@ -802,109 +812,88 @@ export default function BulkImportModal({
           </div>
         )}
 
-        <div className="bulk-validation-notes">
-          <AlertTriangle size={16} />
-          <span>
-            Contactos nuevos se identifican automáticamente. Si un nombre coincide con varios contactos, seleccioná la coincidencia correcta antes de confirmar.
-          </span>
-        </div>
-
-        {duplicateNameWarnings.length > 0 && (
-          <div className="bulk-global-issues">
-            {duplicateNameWarnings.map((warning) => (
-              <p className="warning" key={warning}>{warning}</p>
-            ))}
-          </div>
-        )}
-
-        {recordNameConflicts.length > 0 && (
-          <div className="bulk-global-issues">
-            {recordNameConflicts.map((conflict) => (
-              <p className="error" key={`${conflict.row}-${conflict.name}`}>
-                Contactos, fila {conflict.row}, columna name: el nombre "{conflict.name}" ya existe como "{conflict.existing}".
-              </p>
-            ))}
-          </div>
-        )}
-
-        {relationshipResolutions.length > 0 && (
-          <div className="bulk-resolution-panel">
-            <strong>Resolver relaciones</strong>
-            <p className="muted">
-              Las coincidencias únicas se resuelven automáticamente. Las ambiguas requieren una selección.
-            </p>
-            {relationshipResolutions.map((resolution) => {
-              const hasSelection = resolution.sourceCandidates.length > 1 || resolution.targetCandidates.length > 1;
-              if (!hasSelection && resolution.issues.length === 0) {
-                return null;
-              }
-
-              const renderSelector = (
-                side: 'source' | 'target',
-                name: string,
-                candidates: ResolutionCandidate[],
-                selectedRef: string
-              ) => {
-                if (candidates.length <= 1) {
-                  return null;
-                }
-
-                const selectionKey = `${resolution.row.rowNumber}:${side}`;
-                return (
-                  <label className="bulk-resolution-field">
-                    {side === 'source' ? 'Origen' : 'Destino'}: “{name}”
-                    <select
-                      value={selectedRef}
-                      onChange={(event) =>
-                        setRelationshipSelections((current) => ({
-                          ...current,
-                          [selectionKey]: event.target.value,
-                        }))
-                      }
-                    >
-                      <option value="">Seleccioná una coincidencia</option>
-                      {candidates.map((candidate) => (
-                        <option value={candidate.ref} key={candidate.ref}>
-                          {candidate.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                );
-              };
-
-              return (
-                <div className="bulk-resolution-row" key={resolution.row.rowNumber}>
-                  <strong>Fila {resolution.row.rowNumber}</strong>
-                  {renderSelector('source', resolution.sourceName, resolution.sourceCandidates, resolution.sourceRef)}
-                  {renderSelector('target', resolution.targetName, resolution.targetCandidates, resolution.targetRef)}
-                  {resolution.issues.map((message) => (
-                    <p className="error" key={message}>{message}</p>
-                  ))}
+        {(contactErrors.length > 0 || relationshipErrors.length > 0) && (
+          <div className="bulk-error-sections">
+            {contactErrors.length > 0 && (
+              <section className={`bulk-error-section ${contactErrorsExpanded ? 'expanded' : ''}`}>
+                <button
+                  type="button"
+                  className="bulk-error-toggle"
+                  aria-expanded={contactErrorsExpanded}
+                  aria-controls="bulk-contact-errors"
+                  onClick={() => setContactErrorsExpanded((expanded) => !expanded)}
+                >
+                  <span className="bulk-error-toggle-label">
+                    <AlertTriangle size={16} aria-hidden="true" />
+                    <span>Errores en contactos ({contactErrors.length})</span>
+                  </span>
+                  <ChevronDown
+                    className={`bulk-error-chevron ${contactErrorsExpanded ? 'expanded' : ''}`}
+                    size={16}
+                    aria-hidden="true"
+                  />
+                </button>
+                <div
+                  id="bulk-contact-errors"
+                  className="bulk-error-list"
+                  hidden={!contactErrorsExpanded}
+                >
+                  <ul>
+                    {contactErrors.map((error, index) => (
+                      <li key={`contact-error-${error.row ?? 'global'}-${index}`}>
+                        {displayedErrorText(error)}
+                      </li>
+                    ))}
+                  </ul>
                 </div>
-              );
-            })}
+              </section>
+            )}
+
+            {relationshipErrors.length > 0 && (
+              <section className={`bulk-error-section ${relationshipErrorsExpanded ? 'expanded' : ''}`}>
+                <button
+                  type="button"
+                  className="bulk-error-toggle"
+                  aria-expanded={relationshipErrorsExpanded}
+                  aria-controls="bulk-relationship-errors"
+                  onClick={() => setRelationshipErrorsExpanded((expanded) => !expanded)}
+                >
+                  <span className="bulk-error-toggle-label">
+                    <AlertTriangle size={16} aria-hidden="true" />
+                    <span>Errores en relaciones ({relationshipErrors.length})</span>
+                  </span>
+                  <ChevronDown
+                    className={`bulk-error-chevron ${relationshipErrorsExpanded ? 'expanded' : ''}`}
+                    size={16}
+                    aria-hidden="true"
+                  />
+                </button>
+                <div
+                  id="bulk-relationship-errors"
+                  className="bulk-error-list"
+                  hidden={!relationshipErrorsExpanded}
+                >
+                  <ul>
+                    {relationshipErrors.map((error, index) => (
+                      <li key={`relationship-error-${error.row ?? 'global'}-${index}`}>
+                        {displayedErrorText(error)}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              </section>
+            )}
           </div>
         )}
 
-        {(localGlobalIssues.length > 0 || resolutionIssues.length > 0 || serverIssues.length > 0 || importError) && (
+        {(unclassifiedErrors.length > 0 || (importError && serverIssues.length === 0)) && (
           <div className="bulk-global-issues">
-            {localGlobalIssues.map((currentIssue: ImportIssue, index) => (
-              <p className={currentIssue.severity} key={`${currentIssue.code}-${index}`}>
-                {currentIssue.message}
+            {unclassifiedErrors.map((error, index) => (
+              <p className="error" key={`global-error-${index}`}>
+                {displayedErrorText(error)}
               </p>
             ))}
-            {importError && <p className="error">{importError}</p>}
-            {serverIssues.map((issue, index) => (
-              <p className="error" key={`${issue.code ?? 'server'}-${index}`}>
-                {serverIssueLabel(issue)}
-              </p>
-            ))}
-            {resolutionIssues.map((issue, index) => (
-              <p className="error" key={`${issue.row}-${issue.message}-${index}`}>
-                Fila {issue.row}: {issue.message}
-              </p>
-            ))}
+            {importError && serverIssues.length === 0 && <p className="error">{importError}</p>}
           </div>
         )}
 
@@ -915,133 +904,7 @@ export default function BulkImportModal({
           </div>
         )}
 
-        {validation.rows.length > 0 && (
-          <>
-            <div className="bulk-preview-toolbar">
-              <strong>Vista previa</strong>
-              <div className="bulk-filters" role="group" aria-label="Filtrar filas">
-                {([
-                  ['all', 'Todas'],
-                  ['errors', 'Con errores'],
-                  ['warnings', 'Con advertencias'],
-                ] as const).map(([filter, label]) => (
-                  <button
-                    type="button"
-                    key={filter}
-                    className={previewFilter === filter ? 'active' : ''}
-                    onClick={() => setPreviewFilter(filter)}
-                    disabled={isSubmitting}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="bulk-table-wrap">
-              {visibleRows.length === 0 ? (
-                <p className="muted">No hay filas para este filtro.</p>
-              ) : (
-                <table className="bulk-preview-table">
-                  <thead>
-                    <tr>
-                      <th>Archivo</th>
-                      <th>Fila</th>
-                      {previewHeaders(
-                        visibleRows[0].fileKind,
-                        visibleRows[0].fileKind === 'records' ? recordsFile : relationshipsFile
-                      ).map((header) => (
-                        <th key={header}>{header}</th>
-                      ))}
-                      <th>Estado</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {visibleRows.map((row) => (
-                      <tr
-                        key={`${row.fileKind}-${row.rowNumber}`}
-                        className={
-                          row.issues.some((currentIssue) => currentIssue.severity === 'error')
-                            ? 'has-error'
-                            : row.issues.length > 0
-                              ? 'has-warning'
-                              : ''
-                        }
-                      >
-                        <td>{fileKindLabel(row.fileKind)}</td>
-                        <td>{row.rowNumber}</td>
-                        {previewHeaders(
-                          row.fileKind,
-                          row.fileKind === 'records' ? recordsFile : relationshipsFile
-                        ).map((header) => (
-                          <td key={header}>
-                            <input
-                              className={rowHasIssue(row, header) ? 'bulk-cell-error' : ''}
-                              aria-label={`${header}, fila ${row.rowNumber}`}
-                              value={previewValue(row, header)}
-                              onChange={(event) =>
-                                updateCell(row, header, event.target.value)
-                              }
-                              disabled={isSubmitting}
-                            />
-                          </td>
-                        ))}
-                        <td className="bulk-row-issues">
-                          {row.issues.length === 0 ? (
-                            <span className="bulk-ok">Correcta</span>
-                          ) : (
-                            <ul>
-                              {row.issues.map((currentIssue, index) => (
-                                <li
-                                  className={currentIssue.severity}
-                                  key={`${currentIssue.code}-${index}`}
-                                >
-                                  {currentIssue.message}
-                                </li>
-                              ))}
-                            </ul>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
-
-            <div className="bulk-pagination">
-              <button
-                type="button"
-                className="btn secondary small"
-                disabled={page <= 1 || isSubmitting}
-                onClick={() => setPage((currentPage) => currentPage - 1)}
-              >
-                Anterior
-              </button>
-              <span>
-                Página {Math.min(page, pageCount)} de {pageCount}
-              </span>
-              <button
-                type="button"
-                className="btn secondary small"
-                disabled={page >= pageCount || isSubmitting}
-                onClick={() => setPage((currentPage) => currentPage + 1)}
-              >
-                Siguiente
-              </button>
-            </div>
-          </>
-        )}
-
         <div className="bulk-import-actions modal-actions">
-          <button
-            type="button"
-            className="btn secondary"
-            onClick={clearFiles}
-            disabled={isSubmitting}
-          >
-            <RefreshCw size={15} /> Reemplazar archivos
-          </button>
           <button
             type="button"
             className="btn secondary"

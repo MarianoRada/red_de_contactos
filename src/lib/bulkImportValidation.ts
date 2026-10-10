@@ -273,6 +273,40 @@ function validateRecordRows(file: ParsedCsvFile | undefined) {
     issues.push(...contextualIssues);
   });
 
+  const rowsByName = new Map<string, ImportPreviewRow[]>();
+  rows.forEach((row) => {
+    const key = normalizedForComparison(row.values.name);
+    if (!key) {
+      return;
+    }
+
+    const matchingRows = rowsByName.get(key) ?? [];
+    matchingRows.push(row);
+    rowsByName.set(key, matchingRows);
+  });
+
+  rowsByName.forEach((matchingRows) => {
+    if (matchingRows.length < 2) {
+      return;
+    }
+
+    const rowNumbers = matchingRows.map((row) => row.rowNumber).join(', ');
+    matchingRows.forEach((row) => {
+      if (row.issues.some((currentIssue) => currentIssue.code === 'duplicate-name')) {
+        return;
+      }
+
+      const duplicateIssue = issue(
+        'error',
+        'duplicate-name',
+        `El nombre "${row.values.name}" está repetido en las filas ${rowNumbers}.`,
+        { column: 'name', fileKind: 'records', rowNumber: row.rowNumber }
+      );
+      row.issues.push(duplicateIssue);
+      issues.push(duplicateIssue);
+    });
+  });
+
   return { rows, issues, keys };
 }
 

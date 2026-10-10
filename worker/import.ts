@@ -52,6 +52,8 @@ type PreparedRelationship = {
   source_id: string;
   target_id: string;
   type: RelationshipType;
+  source_name?: string;
+  target_name?: string;
 };
 
 type PendingExistingReference = {
@@ -435,13 +437,15 @@ function prepareRecords(
     if (normalizedRecordName) {
       const previous = recordNames.get(normalizedRecordName);
       if (previous) {
+        const duplicateMessage = `El nombre "${name}" está repetido; también aparece en la fila ${previous}.`;
         addIssue(
           issues,
           'duplicate_record_name',
-          `El nombre "${name}" está repetido; también aparece en la fila ${previous}.`,
+          duplicateMessage,
           row,
           'name'
         );
+        addIssue(issues, 'duplicate_record_name', duplicateMessage, previous, 'name');
       } else {
         recordNames.set(normalizedRecordName, row);
       }
@@ -601,6 +605,7 @@ function prepareRelationshipsByName(
   recordKeyToId: Map<string, string>,
   recordKeyToName: Map<string, string>,
   existingRecords: ExistingRecordReference[],
+  diagnosticExistingByName: Map<string, string>,
   issues: ImportIssue[]
 ) {
   const relationshipKeys = new Map<string, number>();
@@ -718,13 +723,26 @@ function prepareRelationshipsByName(
         return selected.id;
       }
 
+      const existingCandidates = candidates.filter((candidate) => candidate.ref.startsWith('id:'));
+      const importedCandidates = candidates.filter((candidate) => !candidate.ref.startsWith('id:'));
+      const diagnosticExistingId = diagnosticExistingByName.get(normalizeRecordName(name));
+
+      if (
+        diagnosticExistingId &&
+        existingCandidates.length === 1 &&
+        importedCandidates.length === 1 &&
+        existingCandidates[0].id === diagnosticExistingId
+      ) {
+        return diagnosticExistingId;
+      }
+
       if (candidates.length === 0) {
         addIssue(issues, 'missing_reference', `No existe un contacto llamado "${name}".`, row, column);
         return '';
       }
 
       if (candidates.length > 1) {
-        addIssue(issues, 'ambiguous_reference', `El nombre "${name}" coincide con varios contactos; seleccioná uno explícitamente.`, row, column);
+        addIssue(issues, 'ambiguous_reference', `El nombre "${name}" está duplicado en D1.`, row, column);
         return '';
       }
 
@@ -750,7 +768,10 @@ function prepareRelationshipsByName(
       const signature = `${sourceId}\u0000${targetId}\u0000${type}`;
       const previous = relationshipSignatures.get(signature);
       if (previous) {
-        addIssue(issues, 'duplicate_relationship', `La relación ya aparece en la fila ${previous}.`, row);
+        const duplicateMessage = sourceName && targetName
+          ? `Esta relación está repetida en el CSV (fila ${previous}).`
+          : `La relación ya aparece en la fila ${previous}.`;
+        addIssue(issues, 'duplicate_relationship', duplicateMessage, row);
       } else {
         relationshipSignatures.set(signature, row);
       }
@@ -761,6 +782,8 @@ function prepareRelationshipsByName(
       source_id: sourceId,
       target_id: targetId,
       type: type as RelationshipType,
+      source_name: isLegacy ? undefined : sourceName,
+      target_name: isLegacy ? undefined : targetName,
     });
   });
 
@@ -799,16 +822,16 @@ async function existingRelationshipSignatures(
   const { results } = await db
     .prepare(`
       SELECT
-        source_id AS sourceId,
-        target_id AS targetId,
-        type
-      FROM relationships
+        r.source_id AS sourceId,
+        r.target_id AS targetId,
+        r.type
+      FROM relationships AS r
       WHERE EXISTS (
         SELECT 1
         FROM json_each(?) AS incoming
-        WHERE source_id = json_extract(incoming.value, '$.source_id')
-          AND target_id = json_extract(incoming.value, '$.target_id')
-          AND type = json_extract(incoming.value, '$.type')
+        WHERE r.source_id = json_extract(incoming.value, '$.source_id')
+          AND r.target_id = json_extract(incoming.value, '$.target_id')
+          AND r.type = json_extract(incoming.value, '$.type')
       )
     `)
     .bind(JSON.stringify(relationships))
@@ -956,35 +979,41 @@ async function handleImport(request: Request, env: ImportEnv) {
   const existingNames = new Map(
     existingRecords.map((record) => [normalizeRecordName(record.name), record])
   );
+  const importedNameCounts = new Map<string, number>();
+
+  preparedRecords.forEach((record) => {
+    const key = normalizeRecordName(record.name);
+    importedNameCounts.set(key, (importedNameCounts.get(key) ?? 0) + 1);
+  });
+
+  const diagnosticExistingByName = new Map<string, string>();
 
   preparedRecords.forEach((record, index) => {
-    const existing = existingNames.get(normalizeRecordName(record.name));
+    const normalizedName = normalizeRecordName(record.name);
+    const existing = existingNames.get(normalizedName);
     if (existing) {
       addIssue(
         issues,
         'record_name_conflict',
-        `El nombre "${record.name}" ya existe en D1 como "${existing.name}".`,
+        `"${record.name}" ya existe.`,
         index + 2,
         'name'
       );
+
+      if (importedNameCounts.get(normalizedName) === 1) {
+        diagnosticExistingByName.set(normalizedName, existing.id);
+      }
     }
   });
-
-  if (issues.length > 0) {
-    return validationResponse(issues, 409);
-  }
 
   const relationshipPreparation = prepareRelationshipsByName(
     payload.relationships,
     recordKeyToId,
     recordKeyToName,
     existingRecords,
+    diagnosticExistingByName,
     issues
   );
-
-  if (issues.length > 0) {
-    return validationResponse(issues);
-  }
 
   const recordIds = preparedRecords.map((record) => record.id);
   const relationshipIds = relationshipPreparation.prepared.map(
@@ -1018,14 +1047,17 @@ async function handleImport(request: Request, env: ImportEnv) {
       addIssue(
         issues,
         'relationship_conflict',
-        'La relación ya existe en D1 con el mismo origen, destino y tipo.',
+        'Esta relación ya existe.',
         index + 2
       );
     }
   });
 
   if (issues.length > 0) {
-    return validationResponse(issues, 409);
+    const hasExistingDataConflict = issues.some((issue) =>
+      ['record_name_conflict', 'record_conflict', 'relationship_conflict'].includes(issue.code)
+    );
+    return validationResponse(issues, hasExistingDataConflict ? 409 : 422);
   }
 
   const recordsJson = JSON.stringify(preparedRecords);

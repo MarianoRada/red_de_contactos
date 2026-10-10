@@ -249,11 +249,13 @@ export default function App() {
       setData(loadedData);
       setSelectedId(undefined);
       setError(undefined);
+      return true;
     } catch (err) {
       console.error(err);
       setError(
         'La importación se completó, pero no se pudo actualizar la vista. Volvé a intentar la carga de datos.'
       );
+      return false;
     }
   };
 

@@ -19,8 +19,29 @@ npm run build
 npm run preview
 ```
 
+## Frontend local con la API remota
+
+El servidor de desarrollo de Vite redirige las rutas relativas `/api` al despliegue remoto de Pages (`https://red-de-contactos.pages.dev`). Pages reenvía esas solicitudes al Worker `red-contactos`, que utiliza la base D1 remota configurada en Cloudflare.
+
+Iniciá el frontend con:
+
+```bash
+npm run dev
+```
+
+Luego abrí `http://localhost:5173`. El login y las operaciones de escritura siguen requiriendo la cuenta de administrador y el token CSRF de la sesión remota. El proxy adapta únicamente las cookies `Secure` para que puedan funcionar en el origen HTTP local; no modifica el Worker ni la configuración de producción.
+
+Para usar otro destino remoto sin editar archivos, definí `VITE_API_PROXY_TARGET` antes de iniciar Vite. En PowerShell:
+
+```powershell
+$env:VITE_API_PROXY_TARGET = "https://red-de-contactos.pages.dev"
+npm run dev
+```
+
+No se envían credenciales desde el frontend ni se crea una base local. Las pruebas que escriben datos (`test:auth` y `test:import`) usan Wrangler y su entorno local independiente; no son necesarias para probar el frontend contra D1 remoto.
+
 ## Datos
-No usa backend ni servicios externos. Los registros y relaciones se guardan en `localStorage` bajo la clave `red-contactos:v1`. La primera apertura carga automáticamente los datos demo.
+En el entorno desplegado, los registros y relaciones se guardan en la base D1 del Worker. Cuando ejecutás el frontend local con el proxy remoto, las operaciones `/api` utilizan esa misma D1; no se crea una base local ni se usa `localStorage` para los datos de la red.
 
 ## Restablecer demo
 En la parte inferior de la barra izquierda elegí **Restablecer demo** y confirmá. Se eliminan los cambios locales y se restauran los registros y relaciones de ejemplo.

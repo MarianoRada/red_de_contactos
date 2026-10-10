@@ -155,6 +155,12 @@ async function loadRecords() {
   return response.json();
 }
 
+async function loadRelationships() {
+  const response = await fetch(`${baseUrl}/api/relationships`);
+  assert(response.status === 200, `Loading relationships failed with ${response.status}.`);
+  return response.json();
+}
+
 async function stopWorker(child) {
   if (child.exitCode !== null) return;
   await new Promise((resolve) => {
@@ -236,8 +242,25 @@ try {
   });
   assert(existingNameConflict.status === 409, `Expected existing name conflict to return 409, got ${existingNameConflict.status}.`);
   assert(existingNameConflict.body.issues.some((issue) => issue.code === 'record_name_conflict'), 'Existing name conflict issue was not returned.');
+  assert(existingNameConflict.body.issues.some((issue) => issue.message === '"empresa abc" ya existe.' && issue.row === 2 && issue.column === 'name'), 'Existing name conflict details are not clear.');
   records = await loadRecords();
   assert(records.filter((record) => record.name === 'Empresa ABC').length === 1, 'Existing name conflict wrote a duplicate contact.');
+
+  const recordsBeforeCombinedConflict = records.length;
+  const relationshipsBeforeCombinedConflict = (await loadRelationships()).length;
+  const combinedConflict = await importPayload(auth, {
+    importId: 'combined-contact-and-relationship-conflict',
+    records: [
+      { name: ana.name, type: 'institution' },
+      { name: company.name, type: 'person' },
+    ],
+    relationships: [{ source: ana.name, target: company.name, type: 'trabaja en' }],
+  });
+  assert(combinedConflict.status === 409, `Expected combined conflicts to return 409, got ${combinedConflict.status}.`);
+  assert(combinedConflict.body.issues.filter((issue) => issue.code === 'record_name_conflict').length === 2, 'Combined conflict did not return both contact errors.');
+  assert(combinedConflict.body.issues.some((issue) => issue.code === 'relationship_conflict' && issue.message === 'Esta relación ya existe.' && issue.row === 2), 'Combined conflict did not return the relationship error.');
+  assert((await loadRecords()).length === recordsBeforeCombinedConflict, 'Combined conflict wrote contact data.');
+  assert((await loadRelationships()).length === relationshipsBeforeCombinedConflict, 'Combined conflict wrote relationship data.');
 
   const manualRecordId = `manual-${randomBytes(8).toString('hex')}`;
   const manualCreate = await createRecord(auth, {
@@ -294,6 +317,7 @@ try {
     relationships: [{ source: 'No Existe', target: 'Ana Pérez', type: 'financia' }],
   });
   assert(missingReference.status === 422, `Expected missing reference to return 422, got ${missingReference.status}.`);
+  assert(missingReference.body.issues.some((issue) => issue.row === 2 && issue.message.includes('"No Existe"')), 'Missing reference message is not clear.');
 
   const selfRelation = await importPayload(auth, {
     importId: 'self-relation',
@@ -311,6 +335,7 @@ try {
     ],
   });
   assert(duplicateRelation.status === 422, `Expected duplicate relation to return 422, got ${duplicateRelation.status}.`);
+  assert(duplicateRelation.body.issues.some((issue) => issue.message === 'Esta relación está repetida en el CSV (fila 2).' && issue.row === 3), 'Duplicate relation message is not clear.');
 
   const existingRelation = await importPayload(auth, {
     importId: 'existing-relation-conflict',
@@ -318,6 +343,7 @@ try {
     relationships: [{ source: 'Ana Pérez', target: 'Empresa ABC', type: 'trabaja en' }],
   });
   assert(existingRelation.status === 409, `Expected existing relation conflict to return 409, got ${existingRelation.status}.`);
+  assert(existingRelation.body.issues.some((issue) => issue.message === 'Esta relación ya existe.' && issue.row === 2), 'Existing relation conflict message is not clear.');
 
   const atomicImport = await importPayload(auth, {
     importId: 'atomic-invalid',
