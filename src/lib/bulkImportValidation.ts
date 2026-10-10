@@ -196,6 +196,7 @@ function validateRecordRows(file: ParsedCsvFile | undefined) {
   const issues: ImportIssue[] = [];
   const keys = new Map<string, number>();
   const ids = new Map<string, number>();
+  const names = new Map<string, number>();
 
   if (!file) {
     return { rows, issues, keys };
@@ -233,6 +234,21 @@ function validateRecordRows(file: ParsedCsvFile | undefined) {
         rowIssues.push(issue('error', 'duplicate-key', `ID repetido; también aparece en la fila ${previous}.`, { column: 'id' }));
       } else {
         ids.set(id, row.rowNumber);
+      }
+    }
+
+    const normalizedName = normalizedForComparison(name);
+    if (normalizedName) {
+      const previousName = names.get(normalizedName);
+      if (previousName) {
+        rowIssues.push(issue(
+          'error',
+          'duplicate-name',
+          `El nombre "${name}" está repetido; también aparece en la fila ${previousName}.`,
+          { column: 'name' }
+        ));
+      } else {
+        names.set(normalizedName, row.rowNumber);
       }
     }
 

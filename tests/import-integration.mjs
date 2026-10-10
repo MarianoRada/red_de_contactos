@@ -121,6 +121,34 @@ async function importPayload(auth, payload) {
   return jsonResponse(response);
 }
 
+async function createRecord(auth, record) {
+  const response = await fetch(`${baseUrl}/api/records`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Origin: baseUrl,
+      Cookie: auth.cookie,
+      'X-CSRF-Token': auth.csrfToken,
+    },
+    body: JSON.stringify(record),
+  });
+  return jsonResponse(response);
+}
+
+async function updateRecord(auth, id, record) {
+  const response = await fetch(`${baseUrl}/api/records/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      Origin: baseUrl,
+      Cookie: auth.cookie,
+      'X-CSRF-Token': auth.csrfToken,
+    },
+    body: JSON.stringify(record),
+  });
+  return jsonResponse(response);
+}
+
 async function loadRecords() {
   const response = await fetch(`${baseUrl}/api/records`);
   assert(response.status === 200, `Loading records failed with ${response.status}.`);
@@ -201,39 +229,51 @@ try {
   });
   assert(existingOnlyImport.status === 201, `Existing-only relation import failed with ${existingOnlyImport.status}.`);
 
-  const homonymsImport = await importPayload(auth, {
-    importId: 'homonyms',
-    records: [
-      { name: 'Homónimo', type: 'person', location: 'Norte' },
-      { name: 'Homónimo', type: 'person', location: 'Sur' },
-    ],
+  const existingNameConflict = await importPayload(auth, {
+    importId: 'existing-name-conflict',
+    records: [{ name: ' empresa abc ', type: 'institution' }],
     relationships: [],
   });
-  assert(homonymsImport.status === 201, `Homonyms import failed with ${homonymsImport.status}.`);
+  assert(existingNameConflict.status === 409, `Expected existing name conflict to return 409, got ${existingNameConflict.status}.`);
+  assert(existingNameConflict.body.issues.some((issue) => issue.code === 'record_name_conflict'), 'Existing name conflict issue was not returned.');
   records = await loadRecords();
-  const homonyms = records.filter((record) => record.name === 'Homónimo');
-  assert(homonyms.length === 2, 'Homonymous contacts were merged or rejected unexpectedly.');
+  assert(records.filter((record) => record.name === 'Empresa ABC').length === 1, 'Existing name conflict wrote a duplicate contact.');
 
-  const ambiguousExisting = await importPayload(auth, {
-    importId: 'ambiguous-existing',
-    records: [],
-    relationships: [{ source: 'Homónimo', target: 'Ana Pérez', type: 'representa a' }],
+  const manualRecordId = `manual-${randomBytes(8).toString('hex')}`;
+  const manualCreate = await createRecord(auth, {
+    id: manualRecordId,
+    name: 'Manual Unico',
+    description: '',
+    email: '',
+    location: '',
+    type: 'person',
   });
-  assert(ambiguousExisting.status === 422, `Expected ambiguous existing name to return 422, got ${ambiguousExisting.status}.`);
-  assert(ambiguousExisting.body.issues.some((issue) => issue.code === 'ambiguous_reference'), 'Ambiguous name issue was not returned.');
+  assert(manualCreate.status === 201, `Manual record creation failed with ${manualCreate.status}.`);
 
-  const selectedExisting = await importPayload(auth, {
-    importId: 'selected-existing',
-    records: [],
-    relationships: [{
-      source: 'Homónimo',
-      target: 'Ana Pérez',
-      source_ref: `id:${homonyms[0].id}`,
-      target_ref: `id:${ana.id}`,
-      type: 'representa a',
-    }],
+  const manualDuplicate = await createRecord(auth, {
+    id: `manual-duplicate-${randomBytes(8).toString('hex')}`,
+    name: ' manual unico ',
+    description: '',
+    email: '',
+    location: '',
+    type: 'company',
   });
-  assert(selectedExisting.status === 201, `Selected existing relation failed with ${selectedExisting.status}.`);
+  assert(manualDuplicate.status === 409, `Expected manual duplicate creation to return 409, got ${manualDuplicate.status}.`);
+
+  const manualEdit = await createRecord(auth, {
+    id: `manual-edit-${randomBytes(8).toString('hex')}`,
+    name: 'Manual Edit',
+    description: '',
+    email: '',
+    location: '',
+    type: 'person',
+  });
+  assert(manualEdit.status === 201, `Manual edit fixture creation failed with ${manualEdit.status}.`);
+  const manualEditConflict = await updateRecord(auth, manualEdit.body.id, {
+    ...manualEdit.body,
+    name: ' empresa abc ',
+  });
+  assert(manualEditConflict.status === 409, `Expected manual duplicate edit to return 409, got ${manualEditConflict.status}.`);
 
   const newDuplicateImport = await importPayload(auth, {
     importId: 'new-duplicate-names',
@@ -243,23 +283,10 @@ try {
     ],
     relationships: [{ source: 'Nuevo Duplicado', target: 'Ana Pérez', type: 'coordina' }],
   });
-  assert(newDuplicateImport.status === 422, `Expected ambiguous new name to return 422, got ${newDuplicateImport.status}.`);
-
-  const selectedNew = await importPayload(auth, {
-    importId: 'selected-new-duplicate',
-    records: [
-      { name: 'Seleccionado', type: 'person' },
-      { name: 'Seleccionado', type: 'person' },
-    ],
-    relationships: [{
-      source: 'Seleccionado',
-      target: 'Ana Pérez',
-      source_ref: '__import_record_2',
-      target_ref: `id:${ana.id}`,
-      type: 'coordina',
-    }],
-  });
-  assert(selectedNew.status === 201, `Selected new relation failed with ${selectedNew.status}.`);
+  assert(newDuplicateImport.status === 422, `Expected duplicate new name to return 422, got ${newDuplicateImport.status}.`);
+  assert(newDuplicateImport.body.issues.some((issue) => issue.code === 'duplicate_record_name'), 'Duplicate new name issue was not returned.');
+  records = await loadRecords();
+  assert(!records.some((record) => record.name === 'Nuevo Duplicado'), 'Duplicate-name import wrote partial contacts.');
 
   const missingReference = await importPayload(auth, {
     importId: 'missing-reference',

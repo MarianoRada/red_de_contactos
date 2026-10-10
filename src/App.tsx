@@ -193,9 +193,15 @@ export default function App() {
         typeof apiError === 'object' && apiError !== null && 'error' in apiError
           ? String((apiError as { error: unknown }).error)
           : undefined;
+      const apiMessage =
+        typeof apiError === 'object' && apiError !== null && 'message' in apiError
+          ? String((apiError as { message: unknown }).message)
+          : undefined;
 
       setError(
-        errorCode === 'node_limit_exceeded'
+        apiMessage && errorCode === 'duplicate_record_name'
+          ? apiMessage
+          : errorCode === 'node_limit_exceeded'
           ? `La red alcanzÃ³ el lÃ­mite de ${MAX_NODES.toLocaleString('es-AR')} nodos. EliminÃ¡ un registro antes de crear otro.`
           : recordModal === 'edit'
             ? 'No se pudo actualizar el registro.'

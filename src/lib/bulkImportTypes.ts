@@ -18,6 +18,7 @@ export type ImportIssueCode =
   | 'invalid-record-type'
   | 'invalid-relationship-type'
   | 'duplicate-key'
+  | 'duplicate-name'
   | 'invalid-email'
   | 'missing-reference'
   | 'self-relationship'

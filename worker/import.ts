@@ -4,6 +4,7 @@ import {
   type RelationshipType,
 } from '../src/types/models';
 import { MAX_NODES } from '../src/lib/nodeLimits';
+import { normalizeRecordName } from './recordNames';
 
 export interface ImportEnv {
   DB: D1Database;
@@ -276,10 +277,6 @@ function serializedBytes(value: unknown) {
   return new TextEncoder().encode(JSON.stringify(value)).byteLength;
 }
 
-function normalizedName(value: string) {
-  return value.trim().toLocaleLowerCase('es-AR');
-}
-
 function normalizePayload(
   value: unknown,
   issues: ImportIssue[]
@@ -339,6 +336,7 @@ function prepareRecords(
 ) {
   const recordKeys = new Map<string, number>();
   const recordIds = new Map<string, number>();
+  const recordNames = new Map<string, number>();
   const prepared: Array<{
     record_key: string;
     requestedId: string;
@@ -430,6 +428,22 @@ function prepareRecords(
         addIssue(issues, 'duplicate_id', `ID repetido; también aparece en la fila ${previous}.`, row, 'id');
       } else {
         recordIds.set(requestedId, row);
+      }
+    }
+
+    const normalizedRecordName = normalizeRecordName(name);
+    if (normalizedRecordName) {
+      const previous = recordNames.get(normalizedRecordName);
+      if (previous) {
+        addIssue(
+          issues,
+          'duplicate_record_name',
+          `El nombre "${name}" está repetido; también aparece en la fila ${previous}.`,
+          row,
+          'name'
+        );
+      } else {
+        recordNames.set(normalizedRecordName, row);
       }
     }
 
@@ -597,7 +611,7 @@ function prepareRelationshipsByName(
   const candidatesByName = new Map<string, Array<{ ref: string; id: string; name: string }>>();
 
   const addCandidate = (candidate: { ref: string; id: string; name: string }) => {
-    const key = normalizedName(candidate.name);
+    const key = normalizeRecordName(candidate.name);
     const candidates = candidatesByName.get(key) ?? [];
     candidates.push(candidate);
     candidatesByName.set(key, candidates);
@@ -690,7 +704,7 @@ function prepareRelationshipsByName(
         return id ?? '';
       }
 
-      const candidates = candidatesByName.get(normalizedName(name)) ?? [];
+      const candidates = candidatesByName.get(normalizeRecordName(name)) ?? [];
       const selected = selectedRef
         ? candidates.find((candidate) => candidate.ref === selectedRef)
         : undefined;
@@ -939,6 +953,27 @@ async function handleImport(request: Request, env: ImportEnv) {
   });
 
   const existingRecords = await existingRecordReferences(env.DB);
+  const existingNames = new Map(
+    existingRecords.map((record) => [normalizeRecordName(record.name), record])
+  );
+
+  preparedRecords.forEach((record, index) => {
+    const existing = existingNames.get(normalizeRecordName(record.name));
+    if (existing) {
+      addIssue(
+        issues,
+        'record_name_conflict',
+        `El nombre "${record.name}" ya existe en D1 como "${existing.name}".`,
+        index + 2,
+        'name'
+      );
+    }
+  });
+
+  if (issues.length > 0) {
+    return validationResponse(issues, 409);
+  }
+
   const relationshipPreparation = prepareRelationshipsByName(
     payload.relationships,
     recordKeyToId,

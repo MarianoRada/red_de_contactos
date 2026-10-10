@@ -313,6 +313,20 @@ export default function BulkImportModal({
       .map(([name, candidates]) => `"${name}" tiene ${candidates.length} coincidencias; las relaciones con ese nombre requerirán selección.`);
   }, [candidatesByName]);
 
+  const recordNameConflicts = useMemo(() => {
+    return validation.rows
+      .filter((row) => row.fileKind === 'records' && row.values.name)
+      .flatMap((row) => {
+        const existing = existingRecords.find(
+          (record) => normalizedName(record.name) === normalizedName(row.values.name)
+        );
+
+        return existing
+          ? [{ row: row.rowNumber, name: row.values.name, existing: existing.name }]
+          : [];
+      });
+  }, [existingRecords, validation.rows]);
+
   const resolutionIssues = relationshipResolutions.flatMap((resolution) =>
     resolution.issues.map((message) => ({
       message,
@@ -394,6 +408,7 @@ export default function BulkImportModal({
     !isSubmitting &&
     validation.recordsCount + validation.relationshipsCount > 0 &&
     validation.blockingErrorCount === 0 &&
+    recordNameConflicts.length === 0 &&
     resolutionIssues.length === 0 &&
     !overNodeLimit;
 
@@ -798,6 +813,16 @@ export default function BulkImportModal({
           <div className="bulk-global-issues">
             {duplicateNameWarnings.map((warning) => (
               <p className="warning" key={warning}>{warning}</p>
+            ))}
+          </div>
+        )}
+
+        {recordNameConflicts.length > 0 && (
+          <div className="bulk-global-issues">
+            {recordNameConflicts.map((conflict) => (
+              <p className="error" key={`${conflict.row}-${conflict.name}`}>
+                Contactos, fila {conflict.row}, columna name: el nombre "{conflict.name}" ya existe como "{conflict.existing}".
+              </p>
             ))}
           </div>
         )}

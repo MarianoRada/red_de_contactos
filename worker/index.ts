@@ -1,6 +1,10 @@
 import { handleBulkImport } from './import';
 import { handleAuthRequest, requireAdminRequest } from './auth';
 import { MAX_NODES } from '../src/lib/nodeLimits';
+import {
+  findRecordNameConflict,
+  isRecordNameUniqueViolation,
+} from './recordNames';
 
 interface Env {
   DB: D1Database;
@@ -123,8 +127,9 @@ export default {
         url.pathname === '/api/records'
       ) {
         const body = await request.json<ContactRecord>();
+        const name = typeof body.name === 'string' ? body.name.trim() : '';
 
-        if (!body.id || !body.name || !body.type) {
+        if (!body.id || !name || !body.type) {
           return json(
             { error: 'id, name y type son obligatorios' },
             400
@@ -137,6 +142,18 @@ export default {
           return json(
             { error: 'Tipo de registro inválido' },
             400
+          );
+        }
+
+        const nameConflict = await findRecordNameConflict(env.DB, name);
+        if (nameConflict) {
+          return json(
+            {
+              error: 'duplicate_record_name',
+              message: `Ya existe un registro con el nombre "${nameConflict.name}".`,
+              details: { existingId: nameConflict.id },
+            },
+            409
           );
         }
 
@@ -160,7 +177,7 @@ export default {
             `)
             .bind(
               body.id,
-              body.name,
+              name,
               body.description ?? '',
               body.email ?? null,
               body.location ?? null,
@@ -172,10 +189,20 @@ export default {
             return nodeLimitResponse(existingNodes);
           }
 
+          if (isRecordNameUniqueViolation(error)) {
+            return json(
+              {
+                error: 'duplicate_record_name',
+                message: `Ya existe un registro con el nombre "${name}".`,
+              },
+              409
+            );
+          }
+
           throw error;
         }
 
-        return json(body, 201);
+        return json({ ...body, name }, 201);
       }
 
       const recordMatch = url.pathname.match(
@@ -189,8 +216,9 @@ export default {
       ) {
         const id = decodeURIComponent(recordMatch[1]);
         const body = await request.json<ContactRecord>();
+        const name = typeof body.name === 'string' ? body.name.trim() : '';
 
-        if (!body.name || !body.type) {
+        if (!name || !body.type) {
           return json(
             { error: 'name y type son obligatorios' },
             400
@@ -206,27 +234,54 @@ export default {
           );
         }
 
-        const result = await env.DB
-          .prepare(`
-            UPDATE records
-            SET
-              name = ?,
-              description = ?,
-              email = ?,
-              location = ?,
-              type = ?,
-              updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-          `)
-          .bind(
-            body.name,
-            body.description ?? '',
-            body.email ?? null,
-            body.location ?? null,
-            body.type,
-            id
-          )
-          .run();
+        const nameConflict = await findRecordNameConflict(env.DB, name, id);
+        if (nameConflict) {
+          return json(
+            {
+              error: 'duplicate_record_name',
+              message: `Ya existe un registro con el nombre "${nameConflict.name}".`,
+              details: { existingId: nameConflict.id },
+            },
+            409
+          );
+        }
+
+        let result;
+        try {
+          result = await env.DB
+            .prepare(`
+              UPDATE records
+              SET
+                name = ?,
+                description = ?,
+                email = ?,
+                location = ?,
+                type = ?,
+                updated_at = CURRENT_TIMESTAMP
+              WHERE id = ?
+            `)
+            .bind(
+              name,
+              body.description ?? '',
+              body.email ?? null,
+              body.location ?? null,
+              body.type,
+              id
+            )
+            .run();
+        } catch (error) {
+          if (isRecordNameUniqueViolation(error)) {
+            return json(
+              {
+                error: 'duplicate_record_name',
+                message: `Ya existe un registro con el nombre "${name}".`,
+              },
+              409
+            );
+          }
+
+          throw error;
+        }
 
         if (result.meta.changes === 0) {
           return json(
@@ -237,6 +292,7 @@ export default {
 
         return json({
           ...body,
+          name,
           id,
         });
       }
