@@ -1002,6 +1002,7 @@ const EMPTY_NEIGHBORS = new Set<string>();
 type NetworkGraphProps = {
   records: ContactRecord[];
   relationships: Relationship[];
+  graphIntroRequest: number;
   selectedId?: string;
   onSelect: (id: string) => void;
   onClear: () => void;
@@ -1016,6 +1017,7 @@ type NetworkGraphProps = {
 function NetworkGraph({
   records,
   relationships,
+  graphIntroRequest,
   selectedId,
   onSelect,
   onClear,
@@ -1132,6 +1134,8 @@ function NetworkGraph({
 
   const frame =
     useRef<number>();
+  const introRunRef = useRef(0);
+  const lastIntroRequestRef = useRef(graphIntroRequest);
   const nodeRefs = useRef<Map<string, SVGGElement>>(new Map());
   const edgeRefs = useRef<Map<string, SVGLineElement>>(new Map());
   const nodeRefCallbacks = useRef<
@@ -1252,13 +1256,33 @@ function NetworkGraph({
    * ANIMACIÓN INICIAL
    * ============================================================
    */
+  useLayoutEffect(() => {
+    if (lastIntroRequestRef.current === graphIntroRequest) {
+      return;
+    }
+
+    lastIntroRequestRef.current = graphIntroRequest;
+    setIntro(true);
+  }, [graphIntroRequest]);
+
   useEffect(() => {
+    const runId = ++introRunRef.current;
+
+    if (frame.current !== undefined) {
+      cancelAnimationFrame(frame.current);
+      frame.current = undefined;
+    }
+
     const started =
       performance.now();
 
     const tick = (
       now: number
     ) => {
+      if (introRunRef.current !== runId) {
+        return;
+      }
+
       const raw =
         Math.min(
           1,
@@ -1362,7 +1386,10 @@ function NetworkGraph({
           }
         });
 
-        setIntro(false);
+        if (introRunRef.current === runId) {
+          frame.current = undefined;
+          setIntro(false);
+        }
       }
     };
 
@@ -1372,17 +1399,16 @@ function NetworkGraph({
       );
 
     return () => {
-      if (
-        frame.current
-      ) {
+      if (frame.current !== undefined) {
         cancelAnimationFrame(
           frame.current
         );
+        frame.current = undefined;
       }
     };
 
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [graphIntroRequest]);
 
   /*
    * El layout final ya contiene el radio real de cada nÃºcleo. Para evitar que

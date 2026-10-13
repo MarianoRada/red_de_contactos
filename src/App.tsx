@@ -21,6 +21,7 @@ import {
   setAuthFailureHandler,
 } from './lib/api';
 import { MAX_NODES } from './lib/nodeLimits';
+import { shouldReplayGraphIntro } from './lib/bulkImportAnimation';
 import type { BulkImportResult } from './lib/bulkImportTypes';
 import type { AuthSession } from './lib/authTypes';
 
@@ -56,6 +57,7 @@ export default function App() {
 
   const [relationModal, setRelationModal] = useState(false);
   const [bulkImportOpen, setBulkImportOpen] = useState(false);
+  const [graphIntroRequest, setGraphIntroRequest] = useState(0);
 
   // Los paneles laterales comienzan cerrados
   const [leftOpen, setLeftOpen] = useState(false);
@@ -243,12 +245,17 @@ export default function App() {
     }
   };
 
-  const handleBulkImportSuccess = async (_result: BulkImportResult) => {
+  const handleBulkImportSuccess = async (result: BulkImportResult) => {
     try {
       const loadedData = await loadData();
       setData(loadedData);
       setSelectedId(undefined);
       setError(undefined);
+
+      if (shouldReplayGraphIntro(result)) {
+        setGraphIntroRequest((request) => request + 1);
+      }
+
       return true;
     } catch (err) {
       console.error(err);
@@ -455,6 +462,7 @@ export default function App() {
       <NetworkGraph
         records={data.records}
         relationships={data.relationships}
+        graphIntroRequest={graphIntroRequest}
         selectedId={selectedId}
         onSelect={handleGraphSelect}
         onClear={clearGraphSelection}

@@ -166,6 +166,7 @@ export default function BulkImportModal({
   const [recordsFile, setRecordsFile] = useState<ParsedCsvFile>();
   const [relationshipsFile, setRelationshipsFile] = useState<ParsedCsvFile>();
   const [status, setStatus] = useState<ModalStatus>('idle');
+  const [confirmationOpen, setConfirmationOpen] = useState(false);
   const [fileMessage, setFileMessage] = useState<string>();
   const [importError, setImportError] = useState<string>();
   const [serverIssues, setServerIssues] = useState<ServerIssue[]>([]);
@@ -174,6 +175,10 @@ export default function BulkImportModal({
   const [relationshipErrorsExpanded, setRelationshipErrorsExpanded] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const importSessionRef = useRef<{ signature: string; importId: string }>();
+  const submissionStartedRef = useRef(false);
+  const confirmationCancelButtonRef = useRef<HTMLButtonElement>(null);
+  const importConfirmButtonRef = useRef<HTMLButtonElement>(null);
+  const restoreConfirmationFocusRef = useRef(false);
 
   const validation = useMemo(
     () => validateBulkImport(recordsFile, relationshipsFile),
@@ -484,6 +489,18 @@ export default function BulkImportModal({
     setRelationshipErrorsExpanded(false);
   }, [recordsFile, relationshipsFile]);
 
+  useEffect(() => {
+    if (confirmationOpen) {
+      confirmationCancelButtonRef.current?.focus();
+      return;
+    }
+
+    if (restoreConfirmationFocusRef.current && !isSubmitting) {
+      restoreConfirmationFocusRef.current = false;
+      importConfirmButtonRef.current?.focus();
+    }
+  }, [confirmationOpen, isSubmitting]);
+
   const openFilePicker = () => {
     if (!isSubmitting) {
       if (fileInputRef.current) {
@@ -577,18 +594,26 @@ export default function BulkImportModal({
     void loadFiles(Array.from(event.dataTransfer.files));
   };
 
-  const handleSubmit = async () => {
+  const handleSubmit = () => {
     if (!canSubmit) {
       return;
     }
 
-    const confirmed = window.confirm(
-      `Vas a importar ${newNodeCount} registros y ${validation.relationshipsCount} relaciones. ¿Querés continuar?`
-    );
+    setConfirmationOpen(true);
+  };
 
-    if (!confirmed) {
+  const cancelConfirmation = () => {
+    restoreConfirmationFocusRef.current = true;
+    setConfirmationOpen(false);
+  };
+
+  const handleConfirmedSubmit = async () => {
+    if (!canSubmit || submissionStartedRef.current) {
       return;
     }
+
+    submissionStartedRef.current = true;
+    setConfirmationOpen(false);
 
     setStatus('submitting');
     setImportError(undefined);
@@ -617,6 +642,8 @@ export default function BulkImportModal({
           : 'No se pudo completar la importación. Intentá nuevamente.'
       );
       setStatus('error');
+    } finally {
+      submissionStartedRef.current = false;
     }
   };
 
@@ -651,14 +678,63 @@ export default function BulkImportModal({
     .filter((issue) => issue.severity === 'error' && !issue.fileKind)
     .map((issue) => ({ row: issue.rowNumber, message: issue.message }));
 
+  const handleModalClose = () => {
+    if (confirmationOpen) {
+      cancelConfirmation();
+      return;
+    }
+
+    onClose();
+  };
+
   return (
     <Modal
-      title="Carga masiva CSV"
-      onClose={onClose}
+      title={confirmationOpen ? 'Confirmar importación' : 'Carga masiva CSV'}
+      onClose={handleModalClose}
       closeDisabled={isSubmitting}
-      className="bulk-import-modal"
+      className={confirmationOpen ? 'bulk-confirmation-modal' : 'bulk-import-modal'}
     >
-      <div className="bulk-import-content">
+      {confirmationOpen ? (
+        <div className="bulk-confirmation-content">
+          <p>
+            Vas a importar los siguientes datos a la red.
+          </p>
+
+          <div className="bulk-confirmation-summary" aria-label="Resumen de importación">
+            <div>
+              <strong>{newNodeCount}</strong>
+              <span>contactos</span>
+            </div>
+            <div>
+              <strong>{validation.relationshipsCount}</strong>
+              <span>relaciones</span>
+            </div>
+          </div>
+
+          <p>¿Querés confirmar la importación de estos datos?</p>
+
+          <div className="modal-actions">
+            <button
+              type="button"
+              className="btn secondary"
+              onClick={cancelConfirmation}
+              disabled={isSubmitting}
+              ref={confirmationCancelButtonRef}
+            >
+              Cancelar
+            </button>
+            <button
+              type="button"
+              className="btn primary"
+              onClick={() => void handleConfirmedSubmit()}
+              disabled={!canSubmit || isSubmitting}
+            >
+              Confirmar importación
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="bulk-import-content">
         <div
           className="bulk-dropzone"
           onDragOver={(event) => event.preventDefault()}
@@ -913,11 +989,12 @@ export default function BulkImportModal({
           >
             Cerrar
           </button>
-          <button
-            type="button"
-            className="btn primary"
-            disabled={!canSubmit}
-            onClick={() => void handleSubmit()}
+            <button
+              type="button"
+              className="btn primary"
+              disabled={!canSubmit}
+              onClick={handleSubmit}
+              ref={importConfirmButtonRef}
             title={
               overNodeLimit
                 ? 'La importación supera la capacidad disponible'
@@ -927,7 +1004,8 @@ export default function BulkImportModal({
             Confirmar importación
           </button>
         </div>
-      </div>
+        </div>
+      )}
     </Modal>
   );
 }

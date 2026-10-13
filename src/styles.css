@@ -884,6 +884,53 @@ button {
   width: min(1180px, 100%);
 }
 
+.bulk-confirmation-modal {
+  width: min(500px, 100%);
+}
+
+.bulk-confirmation-content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.bulk-confirmation-content p {
+  margin: 0;
+  color: #aeb8c1;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.bulk-confirmation-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.bulk-confirmation-summary > div {
+  border: 1px solid #252e36;
+  border-radius: 8px;
+  background: #0c1014;
+  padding: 12px;
+}
+
+.bulk-confirmation-summary strong,
+.bulk-confirmation-summary span {
+  display: block;
+}
+
+.bulk-confirmation-summary strong {
+  color: #dce4e9;
+  font-size: 22px;
+  font-weight: 500;
+}
+
+.bulk-confirmation-summary span {
+  margin-top: 4px;
+  color: #6d7984;
+  font-size: 11px;
+}
+
 .bulk-import-content {
   display: flex;
   flex-direction: column;
