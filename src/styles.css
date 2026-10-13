@@ -1116,6 +1116,11 @@ button {
   line-height: 1.45;
 }
 
+.bulk-capacity small {
+  color: #8fa9a7;
+  line-height: 1.45;
+}
+
 .bulk-success-message {
   border-left: 2px solid #72a486;
   background: #101b15;

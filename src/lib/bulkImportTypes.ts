@@ -88,6 +88,7 @@ export type BulkImportValidation = {
   blockingErrorCount: number;
   warningCount: number;
   validRowCount: number;
+  validRecordsCount: number;
   correctedRowCount: number;
   recordsCount: number;
   relationshipsCount: number;
