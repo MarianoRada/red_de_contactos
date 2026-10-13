@@ -12,6 +12,7 @@ import type {
   ImportPreviewRow,
   ParsedCsvFile,
 } from './bulkImportTypes';
+import { countValidRecordRows } from './bulkImportValidationMetrics';
 
 export const CONTACT_HEADERS = ['name', 'type', 'description', 'email', 'location'] as const;
 export const RELATIONSHIP_HEADERS = ['source', 'target', 'type'] as const;
@@ -409,6 +410,7 @@ export function validateBulkImport(recordsFile: ParsedCsvFile | undefined, relat
     blockingErrorCount: issues.filter((currentIssue) => currentIssue.severity === 'error').length,
     warningCount: issues.filter((currentIssue) => currentIssue.severity === 'warning').length,
     validRowCount: rows.filter((row) => !row.issues.some((currentIssue) => currentIssue.severity === 'error')).length,
+    validRecordsCount: countValidRecordRows(records.rows),
     correctedRowCount: rowsWithWarnings.size,
     recordsCount: records.rows.length,
     relationshipsCount: relationships.rows.length,

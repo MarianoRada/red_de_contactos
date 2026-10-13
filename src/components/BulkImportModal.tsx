@@ -138,20 +138,6 @@ type DisplayedError = {
   message: string;
 };
 
-function uniqueDisplayedErrors(errors: DisplayedError[]) {
-  const seen = new Set<string>();
-
-  return errors.filter((error) => {
-    const key = `${error.row ?? ''}:${error.message}`;
-    if (seen.has(key)) {
-      return false;
-    }
-
-    seen.add(key);
-    return true;
-  });
-}
-
 function displayedErrorText(error: DisplayedError) {
   return error.row ? `Fila ${error.row}: ${error.message}` : error.message;
 }
@@ -471,7 +457,7 @@ export default function BulkImportModal({
     importId: importSessionRef.current.importId,
   };
 
-  const newNodeCount = validation.recordsCount;
+  const newNodeCount = validation.validRecordsCount;
   const resultingNodeCount = existingNodeCount + newNodeCount;
   const availableNodeCount = Math.max(MAX_NODES - existingNodeCount, 0);
   const overNodeLimit = resultingNodeCount > MAX_NODES;
@@ -647,36 +633,17 @@ export default function BulkImportModal({
     }
   };
 
-  const localGlobalIssues = validation.issues.filter(
-    (currentIssue) => !currentIssue.rowNumber
+  const contactErrors = consolidatedBlockingErrors.filter(
+    (issue) => issue.fileKind === 'records'
   );
 
-  const contactErrors = uniqueDisplayedErrors([
-    ...recordNameConflicts.map((conflict) => ({
-      row: conflict.row,
-      message: `"${conflict.name}" ya existe.`,
-    })),
-    ...localGlobalIssues
-      .filter((issue) => issue.severity === 'error' && issue.fileKind === 'records')
-      .map((issue) => ({ row: issue.rowNumber, message: issue.message })),
-    ...serverIssues
-      .filter((issue) => serverIssueKind(issue) === 'records')
-      .map((issue) => ({ row: issue.row, message: issue.message })),
-  ]);
+  const relationshipErrors = consolidatedBlockingErrors.filter(
+    (issue) => issue.fileKind === 'relationships'
+  );
 
-  const relationshipErrors = uniqueDisplayedErrors([
-    ...resolutionIssues.map((issue) => ({ row: issue.row, message: issue.message })),
-    ...localGlobalIssues
-      .filter((issue) => issue.severity === 'error' && issue.fileKind === 'relationships')
-      .map((issue) => ({ row: issue.rowNumber, message: issue.message })),
-    ...serverIssues
-      .filter((issue) => serverIssueKind(issue) === 'relationships')
-      .map((issue) => ({ row: issue.row, message: issue.message })),
-  ]);
-
-  const unclassifiedErrors = localGlobalIssues
-    .filter((issue) => issue.severity === 'error' && !issue.fileKind)
-    .map((issue) => ({ row: issue.rowNumber, message: issue.message }));
+  const unclassifiedErrors = consolidatedBlockingErrors.filter(
+    (issue) => !issue.fileKind
+  );
 
   const handleModalClose = () => {
     if (confirmationOpen) {
@@ -880,6 +847,11 @@ export default function BulkImportModal({
             <span>
               {existingNodeCount} existentes + {newNodeCount} nuevos = {resultingNodeCount} / {MAX_NODES}
             </span>
+            {validation.recordsCount !== validation.validRecordsCount && (
+              <small>
+                Estimación basada en contactos con formato válido. La importación completa sigue bloqueada mientras haya errores.
+              </small>
+            )}
             {overNodeLimit && (
               <p>
                 La importación supera el límite de {MAX_NODES.toLocaleString('es-AR')} nodos. Actualmente podés agregar hasta {availableNodeCount} registros.
@@ -962,14 +934,13 @@ export default function BulkImportModal({
           </div>
         )}
 
-        {(unclassifiedErrors.length > 0 || (importError && serverIssues.length === 0)) && (
+        {unclassifiedErrors.length > 0 && (
           <div className="bulk-global-issues">
             {unclassifiedErrors.map((error, index) => (
               <p className="error" key={`global-error-${index}`}>
                 {displayedErrorText(error)}
               </p>
             ))}
-            {importError && serverIssues.length === 0 && <p className="error">{importError}</p>}
           </div>
         )}
 
