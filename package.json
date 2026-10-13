@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "test:auth": "node tests/auth-integration.mjs",
     "test:import": "node tests/import-integration.mjs",
-    "test:bulk-counters": "node --experimental-strip-types tests/bulk-import-counters.mjs"
+    "test:bulk-counters": "node --experimental-strip-types tests/bulk-import-counters.mjs",
+    "test:bulk-animation": "node --experimental-strip-types --input-type=module -e \"await import('./tests/bulk-import-animation.mjs')\""
   },
   "dependencies": {
     "lucide-react": "^0.468.0",
