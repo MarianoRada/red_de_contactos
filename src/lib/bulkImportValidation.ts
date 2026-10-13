@@ -12,7 +12,10 @@ import type {
   ImportPreviewRow,
   ParsedCsvFile,
 } from './bulkImportTypes';
-import { countValidRecordRows } from './bulkImportValidationMetrics';
+import {
+  countValidRecordRows,
+  shouldReportEmptyImport,
+} from './bulkImportValidationMetrics';
 
 export const CONTACT_HEADERS = ['name', 'type', 'description', 'email', 'location'] as const;
 export const RELATIONSHIP_HEADERS = ['source', 'target', 'type'] as const;
@@ -400,7 +403,7 @@ export function validateBulkImport(recordsFile: ParsedCsvFile | undefined, relat
     rows.filter((row) => row.issues.some((rowIssue) => rowIssue.severity === 'warning')).map((row) => `${row.fileKind}:${row.rowNumber}`)
   );
 
-  if (rows.length === 0) {
+  if (shouldReportEmptyImport(Boolean(recordsFile || relationshipsFile), rows.length)) {
     issues.push(issue('error', 'empty-file', 'Seleccioná al menos un archivo CSV con datos.'));
   }
 

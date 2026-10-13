@@ -1,5 +1,8 @@
 import { classifyWarningIssues, consolidateBlockingErrors } from '../src/lib/bulkImportCounters.ts';
-import { countValidRecordRows } from '../src/lib/bulkImportValidationMetrics.ts';
+import {
+  countValidRecordRows,
+  shouldReportEmptyImport,
+} from '../src/lib/bulkImportValidationMetrics.ts';
 
 function assert(condition, message) {
   if (!condition) {
@@ -157,6 +160,9 @@ const mixedRecordRows = [
   },
 ];
 assert(countValidRecordRows(mixedRecordRows) === 1, 'Mixed files must count only valid contact rows.');
+assert(!shouldReportEmptyImport(false, 0), 'The initial modal state must not create an empty-import error.');
+assert(shouldReportEmptyImport(true, 0), 'A selected empty file must keep the empty-import validation error.');
+assert(!shouldReportEmptyImport(true, 1), 'A selected file with rows must not create the empty-import error.');
 
 const missingNameErrors = consolidateBlockingErrors({
   validationIssues: [
