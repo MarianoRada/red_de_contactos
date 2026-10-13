@@ -1411,7 +1411,7 @@ function NetworkGraph({
   }, [graphIntroRequest]);
 
   /*
-   * El layout final ya contiene el radio real de cada nÃºcleo. Para evitar que
+   * El layout final ya contiene el radio real de cada núcleo. Para evitar que
    * aparezca de golpe al terminar la intro, conservamos visualmente el radio
    * inicial y animamos solo un transform del SVG durante 1,5 segundos.
    */

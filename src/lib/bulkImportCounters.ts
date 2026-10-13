@@ -82,6 +82,25 @@ export function uniqueBlockingCounterIssues(issues: BlockingCounterIssue[]) {
   });
 }
 
+export function classifyWarningIssues(validationIssues: ImportIssue[]) {
+  const warnings: BlockingCounterIssue[] = validationIssues
+    .filter((issue) => issue.severity === 'warning')
+    .map((issue) => ({
+      fileKind: issue.fileKind,
+      row: issue.rowNumber,
+      column: issue.column,
+      code: issue.code,
+      message: issue.message,
+    }));
+
+  return {
+    records: warnings.filter((issue) => issue.fileKind === 'records'),
+    relationships: warnings.filter((issue) => issue.fileKind === 'relationships'),
+    global: warnings.filter((issue) => !issue.fileKind),
+    total: warnings.length,
+  };
+}
+
 export function consolidateBlockingErrors({
   validationIssues,
   recordNameConflicts,

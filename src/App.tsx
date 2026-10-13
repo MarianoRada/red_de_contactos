@@ -204,7 +204,7 @@ export default function App() {
         apiMessage && errorCode === 'duplicate_record_name'
           ? apiMessage
           : errorCode === 'node_limit_exceeded'
-          ? `La red alcanzÃ³ el lÃ­mite de ${MAX_NODES.toLocaleString('es-AR')} nodos. EliminÃ¡ un registro antes de crear otro.`
+          ? `La red alcanzó el límite de ${MAX_NODES.toLocaleString('es-AR')} nodos. Eliminá un registro antes de crear otro.`
           : recordModal === 'edit'
             ? 'No se pudo actualizar el registro.'
             : 'No se pudo crear el registro.'
@@ -220,7 +220,7 @@ export default function App() {
 
     if (data.records.length >= MAX_NODES) {
       setError(
-        `La red alcanzÃ³ el lÃ­mite de ${MAX_NODES.toLocaleString('es-AR')} nodos. EliminÃ¡ un registro antes de crear otro.`
+        `La red alcanzó el límite de ${MAX_NODES.toLocaleString('es-AR')} nodos. Eliminá un registro antes de crear otro.`
       );
       return;
     }

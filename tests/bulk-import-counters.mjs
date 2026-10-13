@@ -1,4 +1,4 @@
-import { consolidateBlockingErrors } from '../src/lib/bulkImportCounters.ts';
+import { classifyWarningIssues, consolidateBlockingErrors } from '../src/lib/bulkImportCounters.ts';
 import { countValidRecordRows } from '../src/lib/bulkImportValidationMetrics.ts';
 
 function assert(condition, message) {
@@ -66,6 +66,58 @@ const structuralAndWarningErrors = consolidateBlockingErrors({
   serverIssues: [],
 });
 assert(structuralAndWarningErrors.length === 1, 'Warnings must not increase the blocking error counter.');
+
+const classifiedWarnings = classifyWarningIssues([
+  {
+    severity: 'warning',
+    code: 'normalized-value',
+    message: 'El tipo se normalizó.',
+    fileKind: 'records',
+    rowNumber: 4,
+    column: 'type',
+  },
+  {
+    severity: 'warning',
+    code: 'normalized-value',
+    message: 'Se quitaron espacios.',
+    fileKind: 'relationships',
+    rowNumber: 6,
+  },
+  {
+    severity: 'warning',
+    code: 'normalized-value',
+    message: 'El encabezado se normalizó.',
+    fileKind: 'records',
+    column: 'name',
+  },
+  {
+    severity: 'warning',
+    code: 'pending-database-reference',
+    message: 'La referencia se validará contra D1.',
+    fileKind: 'relationships',
+    rowNumber: 7,
+  },
+  {
+    severity: 'warning',
+    code: 'normalized-value',
+    message: 'Advertencia general.',
+  },
+  {
+    severity: 'error',
+    code: 'required-field',
+    message: 'El campo name es obligatorio.',
+    fileKind: 'records',
+    rowNumber: 8,
+  },
+]);
+assert(classifiedWarnings.total === 5, 'Warning classification must preserve every counted warning and exclude errors.');
+assert(classifiedWarnings.records.length === 2, 'Contact warnings must include row and header warnings.');
+assert(classifiedWarnings.relationships.length === 2, 'Relationship warnings must remain consultable in their section.');
+assert(classifiedWarnings.global.length === 1, 'Warnings without a file kind must remain in the global section.');
+assert(
+  classifiedWarnings.records.length + classifiedWarnings.relationships.length + classifiedWarnings.global.length === classifiedWarnings.total,
+  'Every counted warning must belong to exactly one visible warning section.'
+);
 
 const genericBackendError = consolidateBlockingErrors({
   validationIssues: [],

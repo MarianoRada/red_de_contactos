@@ -20,6 +20,7 @@ import {
   validateBulkImport,
 } from '../lib/bulkImportValidation';
 import {
+  classifyWarningIssues,
   consolidateBlockingErrors,
 } from '../lib/bulkImportCounters';
 import type {
@@ -138,6 +139,48 @@ type DisplayedError = {
   message: string;
 };
 
+type IssueAccordionProps = {
+  id: string;
+  title: string;
+  issues: DisplayedError[];
+  expanded: boolean;
+  onToggle: () => void;
+  tone: 'error' | 'warning';
+};
+
+function IssueAccordion({ id, title, issues, expanded, onToggle, tone }: IssueAccordionProps) {
+  return (
+    <section className={`bulk-error-section bulk-${tone}-section ${expanded ? 'expanded' : ''}`}>
+      <button
+        type="button"
+        className={`bulk-error-toggle bulk-${tone}-toggle`}
+        aria-expanded={expanded}
+        aria-controls={id}
+        onClick={onToggle}
+      >
+        <span className="bulk-error-toggle-label">
+          <AlertTriangle size={16} aria-hidden="true" />
+          <span>{title} ({issues.length})</span>
+        </span>
+        <ChevronDown
+          className={`bulk-error-chevron ${expanded ? 'expanded' : ''}`}
+          size={16}
+          aria-hidden="true"
+        />
+      </button>
+      <div id={id} className="bulk-error-list" hidden={!expanded}>
+        <ul>
+          {issues.map((issue, index) => (
+            <li key={`${id}-${issue.row ?? 'global'}-${index}`}>
+              {displayedErrorText(issue)}
+            </li>
+          ))}
+        </ul>
+      </div>
+    </section>
+  );
+}
+
 function displayedErrorText(error: DisplayedError) {
   return error.row ? `Fila ${error.row}: ${error.message}` : error.message;
 }
@@ -159,6 +202,9 @@ export default function BulkImportModal({
   const [lastResult, setLastResult] = useState<BulkImportResult>();
   const [contactErrorsExpanded, setContactErrorsExpanded] = useState(false);
   const [relationshipErrorsExpanded, setRelationshipErrorsExpanded] = useState(false);
+  const [contactWarningsExpanded, setContactWarningsExpanded] = useState(false);
+  const [relationshipWarningsExpanded, setRelationshipWarningsExpanded] = useState(false);
+  const [globalWarningsExpanded, setGlobalWarningsExpanded] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const importSessionRef = useRef<{ signature: string; importId: string }>();
   const submissionStartedRef = useRef(false);
@@ -473,6 +519,9 @@ export default function BulkImportModal({
   useEffect(() => {
     setContactErrorsExpanded(false);
     setRelationshipErrorsExpanded(false);
+    setContactWarningsExpanded(false);
+    setRelationshipWarningsExpanded(false);
+    setGlobalWarningsExpanded(false);
   }, [recordsFile, relationshipsFile]);
 
   useEffect(() => {
@@ -644,6 +693,11 @@ export default function BulkImportModal({
   const unclassifiedErrors = consolidatedBlockingErrors.filter(
     (issue) => !issue.fileKind
   );
+
+  const classifiedWarnings = classifyWarningIssues(validation.issues);
+  const contactWarnings = classifiedWarnings.records;
+  const relationshipWarnings = classifiedWarnings.relationships;
+  const globalWarnings = classifiedWarnings.global;
 
   const handleModalClose = () => {
     if (confirmationOpen) {
@@ -941,6 +995,41 @@ export default function BulkImportModal({
                 {displayedErrorText(error)}
               </p>
             ))}
+          </div>
+        )}
+
+        {classifiedWarnings.total > 0 && (
+          <div className="bulk-error-sections bulk-warning-sections">
+            {contactWarnings.length > 0 && (
+              <IssueAccordion
+                id="bulk-contact-warnings"
+                title="Advertencias en contactos"
+                issues={contactWarnings}
+                expanded={contactWarningsExpanded}
+                onToggle={() => setContactWarningsExpanded((expanded) => !expanded)}
+                tone="warning"
+              />
+            )}
+            {relationshipWarnings.length > 0 && (
+              <IssueAccordion
+                id="bulk-relationship-warnings"
+                title="Advertencias en relaciones"
+                issues={relationshipWarnings}
+                expanded={relationshipWarningsExpanded}
+                onToggle={() => setRelationshipWarningsExpanded((expanded) => !expanded)}
+                tone="warning"
+              />
+            )}
+            {globalWarnings.length > 0 && (
+              <IssueAccordion
+                id="bulk-global-warnings"
+                title="Advertencias generales"
+                issues={globalWarnings}
+                expanded={globalWarningsExpanded}
+                onToggle={() => setGlobalWarningsExpanded((expanded) => !expanded)}
+                tone="warning"
+              />
+            )}
           </div>
         )}
 
