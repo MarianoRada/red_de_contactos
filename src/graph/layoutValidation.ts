@@ -157,16 +157,30 @@ export function repairLayout(
   radii: ReadonlyMap<string, number>,
   bounds: LayoutBounds,
   gap: number,
-  priorityIds: ReadonlySet<string> = new Set()
+  priorityIds: ReadonlySet<string> = new Set(),
+  lockedPositions: ReadonlyMap<string, SpatialPoint> = new Map()
 ) {
   const maxRadius = Math.max(...radii.values(), 0);
   const occupied = new SpatialHash(CELL_SIZE);
   const repaired = new Map<string, SpatialPoint>();
-  const priorityOrder = [...desired.keys()].filter((id) =>
-    priorityIds.has(id)
+  lockedPositions.forEach((point, id) => {
+    if (!desired.has(id)) {
+      return;
+    }
+
+    repaired.set(id, point);
+    occupied.insert(id, point, radii.get(id) ?? 0);
+  });
+
+  const priorityOrder = [...desired.keys()].filter(
+    (id) => priorityIds.has(id) && !lockedPositions.has(id)
   );
   const regularOrder = [...desired.keys()]
-    .filter((id) => !priorityIds.has(id))
+    .filter(
+      (id) =>
+        !priorityIds.has(id) &&
+        !lockedPositions.has(id)
+    )
     .sort(
       (firstId, secondId) =>
         (radii.get(secondId) ?? 0) -

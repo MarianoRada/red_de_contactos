@@ -18,10 +18,7 @@ import {
 
 import type { ContactRecord, Relationship } from '../types/models';
 
-import {
-  loadNodePositions,
-  saveNodePositions,
-} from '../lib/storage';
+import { ApiError, saveNodePosition } from '../lib/api';
 import InfoModal from '../components/InfoModal';
 import { SpatialHash } from './spatialHash';
 import {
@@ -56,6 +53,7 @@ type DragState = {
   offsetY: number;
   startX: number;
   startY: number;
+  initialPosition: P;
   moved: boolean;
   position?: P;
 };
@@ -1131,6 +1129,9 @@ type NetworkGraphProps = {
   onSelect: (id: string) => void;
   onClear: () => void;
   canEdit: boolean;
+  savedPositions: ReadonlyMap<string, P>;
+  onPositionChange: (recordId: string, position: P) => void;
+  onPositionSaveError: (recordId: string, reason?: string) => void;
 };
 
 /*
@@ -1146,6 +1147,9 @@ function NetworkGraph({
   onSelect,
   onClear,
   canEdit,
+  savedPositions,
+  onPositionChange,
+  onPositionSaveError,
 }: NetworkGraphProps) {
   const renderMeasureId = import.meta.env.DEV
     ? `${++performanceMeasureId}`
@@ -1200,9 +1204,12 @@ function NetworkGraph({
   const dragRef = useRef<DragState>();
   const dragSpatialHashRef = useRef<SpatialHash>();
   const suppressClickRef = useRef(false);
-  const [customPositionsByView, setCustomPositionsByView] = useState<
-    Map<string, Map<string, P>>
-  >(() => loadNodePositions());
+  const positionSaveChainsRef = useRef<
+    Map<string, Promise<unknown>>
+  >(new Map());
+  const positionSaveVersionsRef = useRef<Map<string, number>>(
+    new Map()
+  );
   const [zoomMode, setZoomMode] = useState(false);
   const [zoomDirection, setZoomDirection] =
     useState<ZoomDirection>('in');
@@ -1216,8 +1223,6 @@ function NetworkGraph({
   });
 
   /* La selección solo cambia estilos; no crea un layout nuevo. */
-  const layoutKey = 'all';
-
   const relationIndex = useMemo(
     () => buildRelationIndex(relationships),
     [relationships]
@@ -1330,7 +1335,7 @@ function NetworkGraph({
 
   const renderedPos = useMemo(() => {
     const next = new Map(finalPos);
-    const customPositions = customPositionsByView.get(layoutKey);
+    const customPositions = savedPositions;
     const priorityIds = new Set<string>();
     let hasCustomPositions = false;
 
@@ -1365,7 +1370,8 @@ function NetworkGraph({
         maxY: VIEW_HEIGHT - MAX_LAYOUT_RADIUS - NODE_GAP,
       },
       NODE_GAP,
-      priorityIds
+      priorityIds,
+      customPositions
     );
 
     const validation = validateLayout(
@@ -1380,7 +1386,17 @@ function NetworkGraph({
       NODE_GAP
     );
 
-    if (!validation.valid) {
+    const hasAutomaticLayoutIssue =
+      validation.outOfBounds.some(
+        (id) => !customPositions.has(id)
+      ) ||
+      validation.collisions.some(
+        ({ firstId, secondId }) =>
+          !customPositions.has(firstId) ||
+          !customPositions.has(secondId)
+      );
+
+    if (!validation.valid && hasAutomaticLayoutIssue) {
       throw new Error(
         `Layout manual inválido: ${validation.collisions.length} colisiones y ${validation.outOfBounds.length} nodos fuera del viewport.`
       );
@@ -1388,10 +1404,9 @@ function NetworkGraph({
 
     return repaired;
   }, [
-    customPositionsByView,
     finalPos,
-    layoutKey,
     relationIndex,
+    savedPositions,
   ]);
 
   const introAnimationNodes = useMemo<IntroAnimationNode[]>(
@@ -1410,14 +1425,6 @@ function NetworkGraph({
       }),
     [records, renderedPos, startPos]
   );
-
-  useEffect(() => {
-    if (!canEdit) {
-      return;
-    }
-
-    saveNodePositions(customPositionsByView);
-  }, [canEdit, customPositionsByView]);
 
   useEffect(
     () => () => {
@@ -2052,32 +2059,51 @@ function NetworkGraph({
       offsetY: nodePosition.y - point.y,
       startX: point.x,
       startY: point.y,
+      initialPosition: { ...nodePosition },
       moved: false,
     };
     event.currentTarget.setPointerCapture(event.pointerId);
   };
 
-  const commitCustomPosition = (id: string, point: P) => {
-    setCustomPositionsByView((previous) => {
-      const next = new Map(previous);
-      const viewPositions = new Map(
-        next.get(layoutKey) ?? []
-      );
+  const commitNodePosition = (id: string, point: P) => {
+    onPositionChange(id, point);
 
-      viewPositions.set(id, point);
-      next.set(layoutKey, viewPositions);
+    const nextVersion =
+      (positionSaveVersionsRef.current.get(id) ?? 0) + 1;
+    positionSaveVersionsRef.current.set(id, nextVersion);
 
-      if (layoutKey !== 'all') {
-        const allPositions = new Map(
-          next.get('all') ?? []
-        );
+    const previousRequest =
+      positionSaveChainsRef.current.get(id) ??
+      Promise.resolve();
+    const request = previousRequest
+      .catch(() => undefined)
+      .then(() => saveNodePosition(id, point.x, point.y));
 
-        allPositions.set(id, point);
-        next.set('all', allPositions);
-      }
+    positionSaveChainsRef.current.set(id, request);
 
-      return next;
-    });
+    void request
+      .catch((error) => {
+        if (
+          positionSaveVersionsRef.current.get(id) !==
+          nextVersion
+        ) {
+          return;
+        }
+
+        const reason =
+          error instanceof ApiError
+            ? error.message
+            : undefined;
+        onPositionSaveError(id, reason);
+      })
+      .finally(() => {
+        if (
+          positionSaveChainsRef.current.get(id) ===
+          request
+        ) {
+          positionSaveChainsRef.current.delete(id);
+        }
+      });
   };
 
   const applyDragMove = (
@@ -2193,8 +2219,13 @@ function NetworkGraph({
 
     flushDragMove();
 
-    if (drag.moved && drag.position) {
-      commitCustomPosition(drag.id, drag.position);
+    if (
+      drag.moved &&
+      drag.position &&
+      (drag.position.x !== drag.initialPosition.x ||
+        drag.position.y !== drag.initialPosition.y)
+    ) {
+      commitNodePosition(drag.id, drag.position);
     }
 
     suppressClickRef.current = drag.moved;

@@ -149,6 +149,38 @@ async function updateRecord(auth, id, record) {
   return jsonResponse(response);
 }
 
+async function deleteRecord(auth, id) {
+  const response = await fetch(`${baseUrl}/api/records/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    headers: {
+      Origin: baseUrl,
+      Cookie: auth.cookie,
+      'X-CSRF-Token': auth.csrfToken,
+    },
+  });
+  return jsonResponse(response);
+}
+
+async function loadNodePositions() {
+  const response = await fetch(`${baseUrl}/api/node-positions`);
+  assert(response.status === 200, `Loading node positions failed with ${response.status}.`);
+  return response.json();
+}
+
+async function saveNodePosition(auth, recordId, x, y) {
+  const response = await fetch(`${baseUrl}/api/node-positions/${encodeURIComponent(recordId)}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      Origin: baseUrl,
+      Cookie: auth.cookie,
+      'X-CSRF-Token': auth.csrfToken,
+    },
+    body: JSON.stringify({ x, y }),
+  });
+  return jsonResponse(response);
+}
+
 async function loadRecords() {
   const response = await fetch(`${baseUrl}/api/records`);
   assert(response.status === 200, `Loading records failed with ${response.status}.`);
@@ -273,6 +305,23 @@ try {
   });
   assert(manualCreate.status === 201, `Manual record creation failed with ${manualCreate.status}.`);
 
+  const unauthorizedPosition = await fetch(
+    `${baseUrl}/api/node-positions/${encodeURIComponent(manualRecordId)}`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ x: 321, y: 654 }),
+    }
+  );
+  assert(unauthorizedPosition.status === 401, `Expected unauthorized node position write to return 401, got ${unauthorizedPosition.status}.`);
+
+  const savedPosition = await saveNodePosition(auth, manualRecordId, 321, 654);
+  assert(savedPosition.status === 200, `Saving node position failed with ${savedPosition.status}.`);
+  assert(savedPosition.body.recordId === manualRecordId && savedPosition.body.x === 321 && savedPosition.body.y === 654, 'Saved node position response is incorrect.');
+
+  const loadedPositions = await loadNodePositions();
+  assert(loadedPositions.some((position) => position.recordId === manualRecordId && position.x === 321 && position.y === 654), 'Saved node position was not returned publicly.');
+
   const manualDuplicate = await createRecord(auth, {
     id: `manual-duplicate-${randomBytes(8).toString('hex')}`,
     name: ' manual unico ',
@@ -282,6 +331,11 @@ try {
     type: 'company',
   });
   assert(manualDuplicate.status === 409, `Expected manual duplicate creation to return 409, got ${manualDuplicate.status}.`);
+
+  const manualDelete = await deleteRecord(auth, manualRecordId);
+  assert(manualDelete.status === 200, `Deleting the positioned record failed with ${manualDelete.status}.`);
+  assert(!(await loadRecords()).some((record) => record.id === manualRecordId), 'Positioned record was not deleted.');
+  assert(!(await loadNodePositions()).some((position) => position.recordId === manualRecordId), 'Node position was not deleted by the record cascade.');
 
   const manualEdit = await createRecord(auth, {
     id: `manual-edit-${randomBytes(8).toString('hex')}`,

@@ -12,6 +12,7 @@ import {
   ApiError,
   getAuthSession,
   loadData,
+  loadNodePositions,
   createRecord,
   updateRecord as updateRecordApi,
   deleteRecord as deleteRecordApi,
@@ -20,6 +21,7 @@ import {
   logoutAdmin,
   setAuthFailureHandler,
 } from './lib/api';
+import type { NodePosition } from './lib/api';
 import { MAX_NODES } from './lib/nodeLimits';
 import { shouldReplayGraphIntro } from './lib/bulkImportAnimation';
 import type { BulkImportResult } from './lib/bulkImportTypes';
@@ -37,8 +39,13 @@ const EMPTY_DATA: AppData = {
   relationships: [],
 };
 
+type SavedNodePosition = Pick<NodePosition, 'x' | 'y'>;
+
 export default function App() {
   const [data, setData] = useState<AppData>(EMPTY_DATA);
+  const [savedPositions, setSavedPositions] = useState<
+    Map<string, SavedNodePosition>
+  >(() => new Map());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
   const [authLoading, setAuthLoading] = useState(true);
@@ -77,10 +84,49 @@ export default function App() {
         setLoading(true);
         setError(undefined);
 
-        const loadedData = await loadData();
+        const [dataResult, positionsResult] =
+          await Promise.allSettled([
+            loadData(),
+            loadNodePositions(),
+          ]);
+
+        if (dataResult.status === 'rejected') {
+          throw dataResult.reason;
+        }
+
+        const loadedData = dataResult.value;
+        const loadedPositions =
+          positionsResult.status === 'fulfilled'
+            ? positionsResult.value
+            : [];
+        const recordIds = new Set(
+          loadedData.records.map((record) => record.id)
+        );
+        const positionsById = new Map<string, SavedNodePosition>();
+
+        loadedPositions.forEach((position) => {
+          if (
+            recordIds.has(position.recordId) &&
+            Number.isFinite(position.x) &&
+            Number.isFinite(position.y)
+          ) {
+            positionsById.set(position.recordId, {
+              x: position.x,
+              y: position.y,
+            });
+          }
+        });
 
         if (!cancelled) {
           setData(loadedData);
+          setSavedPositions(positionsById);
+
+          if (positionsResult.status === 'rejected') {
+            console.error(positionsResult.reason);
+            setError(
+              'No se pudieron cargar las posiciones guardadas. Se utilizarÃ¡ la distribuciÃ³n automÃ¡tica.'
+            );
+          }
         }
       } catch (err) {
         console.error(err);
@@ -266,6 +312,28 @@ export default function App() {
     }
   };
 
+  const handlePositionChange = useCallback(
+    (recordId: string, position: SavedNodePosition) => {
+      setSavedPositions((current) => {
+        const next = new Map(current);
+        next.set(recordId, position);
+        return next;
+      });
+    },
+    []
+  );
+
+  const handlePositionSaveError = useCallback(
+    (recordId: string, reason?: string) => {
+      setError(
+        `No se pudo guardar la posiciÃ³n de "${recordId}" en D1.${
+          reason ? ` ${reason}` : ' VerificÃ¡ la conexiÃ³n e intentÃ¡ nuevamente.'
+        }`
+      );
+    },
+    []
+  );
+
   const removeRecord = async () => {
     if (
       !selected ||
@@ -291,6 +359,16 @@ export default function App() {
             relationship.targetId !== selected.id
         ),
       }));
+
+      setSavedPositions((current) => {
+        if (!current.has(selected.id)) {
+          return current;
+        }
+
+        const next = new Map(current);
+        next.delete(selected.id);
+        return next;
+      });
 
       setSelectedId(undefined);
     } catch (err) {
@@ -467,6 +545,9 @@ export default function App() {
         onSelect={handleGraphSelect}
         onClear={clearGraphSelection}
         canEdit={isAdmin}
+        savedPositions={savedPositions}
+        onPositionChange={handlePositionChange}
+        onPositionSaveError={handlePositionSaveError}
       />
 
       <DetailsPanel
