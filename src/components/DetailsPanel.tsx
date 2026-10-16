@@ -12,8 +12,9 @@ import {
   Pencil,
   X,
 } from 'lucide-react';
+import { useMemo } from 'react';
 import type { ContactRecord, Relationship } from '../types/models';
-import { getOtherId, getRecord, getRelationsFor } from '../lib/relations';
+import { getOtherId } from '../lib/relations';
 
 const icons = {
   person: UserRound,
@@ -54,6 +55,36 @@ export default function DetailsPanel({
   onDeleteRelation,
   isAdmin,
 }: DetailsPanelProps) {
+  const relationshipsByNode = useMemo(() => {
+    if (!open || !record) {
+      return new Map<string, Relationship[]>();
+    }
+
+    const index = new Map<string, Relationship[]>();
+
+    relationships.forEach((relationship) => {
+      const sourceRelations =
+        index.get(relationship.sourceId) ?? [];
+      const targetRelations =
+        index.get(relationship.targetId) ?? [];
+
+      sourceRelations.push(relationship);
+      targetRelations.push(relationship);
+      index.set(relationship.sourceId, sourceRelations);
+      index.set(relationship.targetId, targetRelations);
+    });
+
+    return index;
+  }, [open, record, relationships]);
+
+  const recordsById = useMemo(
+    () =>
+      open && record
+        ? new Map(records.map((item) => [item.id, item]))
+        : new Map<string, ContactRecord>(),
+    [open, record, records]
+  );
+
   if (!open) {
     return (
       <button className="panel-reopen right" onClick={onToggle} aria-label="Mostrar panel de detalles" title="Mostrar detalles">
@@ -76,7 +107,7 @@ export default function DetailsPanel({
     );
   }
 
-  const rels = getRelationsFor(record.id, relationships);
+  const rels = relationshipsByNode.get(record.id) ?? [];
   const Icon = icons[record.type];
 
   return (
@@ -107,7 +138,7 @@ export default function DetailsPanel({
       </div>
       <div className="relation-list">
         {rels.map((rel) => {
-          const other = getRecord(getOtherId(rel, record.id), records);
+          const other = recordsById.get(getOtherId(rel, record.id));
           if (!other) return null;
           const OtherIcon = icons[other.type];
           return (

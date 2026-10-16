@@ -1,5 +1,6 @@
 import {
   memo,
+  useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -33,6 +34,15 @@ type P = {
   y: number;
 };
 
+type IntroAnimationNode = {
+  id: string;
+  from: P;
+  to: P;
+  phase: number;
+  orbitWidth: number;
+  orbitHeight: number;
+};
+
 type Bounds = {
   minX: number;
   maxX: number;
@@ -56,6 +66,17 @@ type ViewBox = {
   width: number;
   height: number;
   scale: number;
+};
+
+type PendingZoom = {
+  clientX: number;
+  clientY: number;
+  factor: number;
+};
+
+type PendingDragPoint = {
+  clientX: number;
+  clientY: number;
 };
 
 type ZoomDirection = 'in' | 'out';
@@ -138,27 +159,42 @@ const hash = (s: string) =>
 export function positions(
   records: ContactRecord[],
   rels: Relationship[],
-  selected?: string
+  selected?: string,
+  indexedNeighbors?: ReadonlyMap<string, Set<string>>
 ) {
   const map = new Map<string, P>();
   const spatialHash = new SpatialHash(SPATIAL_CELL_SIZE);
 
-  const neighborsByNode = new Map<string, Set<string>>();
+  const neighborsByNode =
+    indexedNeighbors ?? new Map<string, Set<string>>();
 
-  rels.forEach((rel) => {
-    const sourceNeighbors =
-      neighborsByNode.get(rel.sourceId) ?? new Set<string>();
-    const targetNeighbors =
-      neighborsByNode.get(rel.targetId) ?? new Set<string>();
+  if (!indexedNeighbors) {
+    const mutableNeighbors = neighborsByNode as Map<
+      string,
+      Set<string>
+    >;
 
-    sourceNeighbors.add(rel.targetId);
-    targetNeighbors.add(rel.sourceId);
-    neighborsByNode.set(rel.sourceId, sourceNeighbors);
-    neighborsByNode.set(rel.targetId, targetNeighbors);
+    rels.forEach((rel) => {
+      const sourceNeighbors =
+        mutableNeighbors.get(rel.sourceId) ?? new Set<string>();
+      const targetNeighbors =
+        mutableNeighbors.get(rel.targetId) ?? new Set<string>();
+
+      sourceNeighbors.add(rel.targetId);
+      targetNeighbors.add(rel.sourceId);
+      mutableNeighbors.set(rel.sourceId, sourceNeighbors);
+      mutableNeighbors.set(rel.targetId, targetNeighbors);
+    });
+  }
+
+  const radiusByNode = new Map<string, number>();
+
+  neighborsByNode.forEach((neighbors, id) => {
+    radiusByNode.set(id, nodeSizes(neighbors.size).core);
   });
 
   const radiusFor = (id: string) =>
-    nodeSizes(neighborsByNode.get(id)?.size ?? 0).core;
+    radiusByNode.get(id) ?? nodeSizes(0).core;
 
   const registerPosition = (id: string, point: P) => {
     map.set(id, point);
@@ -927,6 +963,94 @@ const GraphEdge = memo(function GraphEdge({
   );
 });
 
+type GraphNodeProps = {
+  record: ContactRecord;
+  point: P;
+  connectionCount: number;
+  coreRadius: number;
+  selected: boolean;
+  neighbor: boolean;
+  dim: boolean;
+  intro: boolean;
+  nodeRef: (element: SVGGElement | null) => void;
+  onPointerDown: (
+    event: PointerEvent<SVGGElement>,
+    id: string
+  ) => void;
+  onHover: (id?: string) => void;
+  onClick: (
+    event: MouseEvent<SVGGElement>,
+    id: string
+  ) => void;
+  onSelect: (id: string) => void;
+};
+
+const GraphNode = memo(function GraphNode({
+  record,
+  point,
+  connectionCount,
+  coreRadius,
+  selected,
+  neighbor,
+  dim,
+  intro,
+  nodeRef,
+  onPointerDown,
+  onHover,
+  onClick,
+  onSelect,
+}: GraphNodeProps) {
+  return (
+    <g
+      ref={nodeRef}
+      className={`node ${record.type} ${selected ? 'selected' : ''} ${
+        neighbor ? 'neighbor' : ''
+      } ${dim ? 'dim' : ''} ${intro ? 'intro-node' : ''}`}
+      transform={`translate(${point.x},${point.y})`}
+      role="button"
+      tabIndex={intro ? -1 : 0}
+      onPointerDown={(event) => onPointerDown(event, record.id)}
+      aria-label={`${record.name}, ${record.type}, ${connectionCount} ${
+        connectionCount === 1 ? 'conexión' : 'conexiones'
+      }`}
+      onMouseEnter={() => !intro && onHover(record.id)}
+      onMouseLeave={() => onHover(undefined)}
+      onFocus={() => !intro && onHover(record.id)}
+      onBlur={() => onHover(undefined)}
+      onClick={(event) => onClick(event, record.id)}
+      onKeyDown={(event) => {
+        if (
+          !intro &&
+          (event.key === 'Enter' || event.key === ' ')
+        ) {
+          onSelect(record.id);
+        }
+      }}
+    >
+      <circle
+        className="node-core"
+        r={
+          selected
+            ? 8
+            : neighbor
+              ? Math.max(5.5, coreRadius)
+              : intro
+                ? 4
+                : coreRadius
+        }
+      />
+
+      <text
+        className="node-name"
+        pointerEvents="none"
+        y={coreRadius + 15}
+      >
+        {record.name}
+      </text>
+    </g>
+  );
+});
+
 function nodeSizes(connectionCount: number) {
   const baseRadius = Math.min(
     MIN_NODE_RADIUS + connectionCount * NODE_RADIUS_STEP,
@@ -1070,6 +1194,9 @@ function NetworkGraph({
     useState(true);
 
   const svgRef = useRef<SVGSVGElement>(null);
+  const graphStageRef = useRef<HTMLDivElement>(null);
+  const graphCanvasViewportRef = useRef<HTMLDivElement>(null);
+  const graphCanvasLayerRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<DragState>();
   const dragSpatialHashRef = useRef<SpatialHash>();
   const suppressClickRef = useRef(false);
@@ -1091,6 +1218,22 @@ function NetworkGraph({
   /* La selección solo cambia estilos; no crea un layout nuevo. */
   const layoutKey = 'all';
 
+  const relationIndex = useMemo(
+    () => buildRelationIndex(relationships),
+    [relationships]
+  );
+
+  const relationLabelWidths = useMemo(
+    () =>
+      new Map(
+        relationships.map((rel) => [
+          rel.id,
+          Math.max(112, rel.type.length * 7.2 + 24),
+        ])
+      ),
+    [relationships]
+  );
+
   /*
    * Posiciones finales.
    */
@@ -1106,12 +1249,15 @@ function NetworkGraph({
           () =>
             positions(
               records,
-              relationships
+              relationships,
+              undefined,
+              relationIndex.neighborsByNode
             )
         ),
       [
         records,
         relationships,
+        relationIndex.neighborsByNode,
       ]
     );
 
@@ -1127,13 +1273,12 @@ function NetworkGraph({
       [records]
     );
 
-  const relationIndex = useMemo(
-    () => buildRelationIndex(relationships),
-    [relationships]
-  );
-
   const frame =
     useRef<number>();
+  const zoomFrame = useRef<number>();
+  const pendingZoom = useRef<PendingZoom>();
+  const dragMoveFrame = useRef<number>();
+  const pendingDragPoint = useRef<PendingDragPoint>();
   const introRunRef = useRef(0);
   const lastIntroRequestRef = useRef(graphIntroRequest);
   const nodeRefs = useRef<Map<string, SVGGElement>>(new Map());
@@ -1187,13 +1332,19 @@ function NetworkGraph({
     const next = new Map(finalPos);
     const customPositions = customPositionsByView.get(layoutKey);
     const priorityIds = new Set<string>();
+    let hasCustomPositions = false;
 
     customPositions?.forEach((point, id) => {
       if (next.has(id)) {
         next.set(id, point);
         priorityIds.add(id);
+        hasCustomPositions = true;
       }
     });
+
+    if (!hasCustomPositions) {
+      return finalPos;
+    }
 
     const radii = new Map(
       [...next.keys()].map((id) => [
@@ -1243,6 +1394,23 @@ function NetworkGraph({
     relationIndex,
   ]);
 
+  const introAnimationNodes = useMemo<IntroAnimationNode[]>(
+    () =>
+      records.map((record, i) => {
+        const h = Math.abs(hash(record.id));
+
+        return {
+          id: record.id,
+          from: startPos.get(record.id)!,
+          to: renderedPos.get(record.id)!,
+          phase: (h % 628) / 100 + i * 0.8,
+          orbitWidth: 42 + (h % 55),
+          orbitHeight: 30 + (h % 42),
+        };
+      }),
+    [records, renderedPos, startPos]
+  );
+
   useEffect(() => {
     if (!canEdit) {
       return;
@@ -1250,6 +1418,128 @@ function NetworkGraph({
 
     saveNodePositions(customPositionsByView);
   }, [canEdit, customPositionsByView]);
+
+  useEffect(
+    () => () => {
+      if (zoomFrame.current !== undefined) {
+        cancelAnimationFrame(zoomFrame.current);
+      }
+
+      if (dragMoveFrame.current !== undefined) {
+        cancelAnimationFrame(dragMoveFrame.current);
+      }
+    },
+    []
+  );
+
+  useLayoutEffect(() => {
+    const stage = graphStageRef.current;
+    const canvasViewport = graphCanvasViewportRef.current;
+    const canvasLayer = graphCanvasLayerRef.current;
+    const shell = stage?.closest<HTMLElement>('.app-shell');
+
+    if (!stage || !canvasViewport || !canvasLayer || !shell) {
+      return;
+    }
+
+    let frameId: number | undefined;
+    let unlockFrameId: number | undefined;
+    let initial = true;
+
+    const applyViewportTransform = () => {
+      frameId = undefined;
+
+      const stageRect = stage.getBoundingClientRect();
+      const shellStyle = getComputedStyle(shell);
+      const leftSpace =
+        Number.parseFloat(
+          shellStyle.getPropertyValue('--left-space')
+        ) || 0;
+      const rightSpace =
+        Number.parseFloat(
+          shellStyle.getPropertyValue('--right-space')
+        ) || 0;
+      const width = Math.max(stageRect.width, 1);
+      const height = Math.max(stageRect.height, 1);
+      const availableWidth = Math.max(
+        width - leftSpace - rightSpace,
+        1
+      );
+      const fullScale = Math.min(
+        width / VIEW_WIDTH,
+        height / VIEW_HEIGHT
+      );
+      const targetScale = Math.min(
+        availableWidth / VIEW_WIDTH,
+        height / VIEW_HEIGHT
+      );
+      const relativeScale = targetScale / Math.max(fullScale, 0.0001);
+      const shiftX = (leftSpace - rightSpace) / 2;
+
+      if (initial) {
+        canvasLayer.style.transition = 'none';
+        canvasViewport.style.transition = 'none';
+      } else {
+        canvasLayer.style.transition = 'transform .32s ease';
+        canvasViewport.style.transition = 'clip-path .32s ease';
+      }
+
+      canvasLayer.style.transform =
+        `translate3d(${shiftX}px, 0, 0) scale(${relativeScale})`;
+      canvasViewport.style.clipPath =
+        `inset(0px ${rightSpace}px 0px ${leftSpace}px)`;
+
+      if (initial) {
+        initial = false;
+        unlockFrameId = requestAnimationFrame(() => {
+          unlockFrameId = undefined;
+          canvasLayer.style.transition =
+            'transform .32s ease';
+          canvasViewport.style.transition = 'clip-path .32s ease';
+        });
+      }
+    };
+
+    const scheduleViewportTransform = () => {
+      if (frameId !== undefined) {
+        return;
+      }
+
+      frameId = requestAnimationFrame(applyViewportTransform);
+    };
+
+    applyViewportTransform();
+
+    const mutationObserver = new MutationObserver(
+      scheduleViewportTransform
+    );
+    mutationObserver.observe(shell, {
+      attributes: true,
+      attributeFilter: ['class'],
+    });
+
+    const resizeObserver =
+      typeof ResizeObserver === 'undefined'
+        ? undefined
+        : new ResizeObserver(scheduleViewportTransform);
+
+    resizeObserver?.observe(stage);
+    window.addEventListener('resize', scheduleViewportTransform);
+
+    return () => {
+      mutationObserver.disconnect();
+      resizeObserver?.disconnect();
+      window.removeEventListener('resize', scheduleViewportTransform);
+
+      if (frameId !== undefined) {
+        cancelAnimationFrame(frameId);
+      }
+
+      if (unlockFrameId !== undefined) {
+        cancelAnimationFrame(unlockFrameId);
+      }
+    };
+  }, []);
 
   /*
    * ============================================================
@@ -1298,46 +1588,26 @@ function NetworkGraph({
           4
         );
 
-      records.forEach(
-        (
-          record,
-          i
-        ) => {
-          const from =
-            startPos.get(
-              record.id
-            )!;
+      const energy = Math.pow(
+        1 - raw,
+        2.35
+      );
 
-          const to =
-            renderedPos.get(
-              record.id
-            )!;
-
-          const h =
-            Math.abs(
-              hash(
-                record.id
-              )
-            );
-
-          const energy =
-            Math.pow(
-              1 - raw,
-              2.35
-            );
-
-          const phase =
-            (h % 628) /
-              100 +
-            i * 0.8;
-
+      introAnimationNodes.forEach(
+        ({
+          id,
+          from,
+          to,
+          phase,
+          orbitWidth,
+          orbitHeight,
+        }) => {
           const orbitX =
             Math.sin(
               raw * 18 +
                 phase
             ) *
-            (42 +
-              (h % 55)) *
+            orbitWidth *
             energy;
 
           const orbitY =
@@ -1345,8 +1615,7 @@ function NetworkGraph({
               raw * 15 +
                 phase
             ) *
-            (30 +
-              (h % 42)) *
+            orbitHeight *
             energy;
 
           const x =
@@ -1359,7 +1628,7 @@ function NetworkGraph({
             (to.y - from.y) *
               eased +
             orbitY;
-          const element = nodeRefs.current.get(record.id);
+          const element = nodeRefs.current.get(id);
 
           element?.setAttribute(
             'transform',
@@ -1374,18 +1643,6 @@ function NetworkGraph({
             tick
           );
       } else {
-        records.forEach((record) => {
-          const point = renderedPos.get(record.id);
-          const element = nodeRefs.current.get(record.id);
-
-          if (point) {
-            element?.setAttribute(
-              'transform',
-              `translate(${point.x},${point.y})`
-            );
-          }
-        });
-
         if (introRunRef.current === runId) {
           frame.current = undefined;
           setIntro(false);
@@ -1407,6 +1664,8 @@ function NetworkGraph({
       }
     };
 
+    // The animation intentionally starts only when the intro request changes.
+    // Its current node data is captured from that render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [graphIntroRequest]);
 
@@ -1437,7 +1696,15 @@ function NetworkGraph({
       core.style.transformOrigin = 'center';
       core.style.transition = 'none';
       core.style.transform = `scale(${initialScale})`;
-      void core.getBoundingClientRect();
+    });
+
+    // Flush the initial state once for the whole collection instead of
+    // forcing a layout read after every individual style write.
+    if (cores.length > 0) {
+      void cores[0].getBoundingClientRect();
+    }
+
+    cores.forEach((core) => {
       core.style.transition = `transform ${INTRO_GROWTH_MS}ms ease-in-out`;
     });
 
@@ -1665,13 +1932,41 @@ function NetworkGraph({
     );
   };
 
+  const scheduleZoomAt = (
+    clientX: number,
+    clientY: number,
+    factor: number
+  ) => {
+    const current = pendingZoom.current;
+
+    pendingZoom.current = {
+      clientX,
+      clientY,
+      factor: current ? current.factor * factor : factor,
+    };
+
+    if (zoomFrame.current !== undefined) {
+      return;
+    }
+
+    zoomFrame.current = requestAnimationFrame(() => {
+      zoomFrame.current = undefined;
+      const next = pendingZoom.current;
+      pendingZoom.current = undefined;
+
+      if (next) {
+        zoomAt(next.clientX, next.clientY, next.factor);
+      }
+    });
+  };
+
   const handleWheel = (event: WheelEvent<SVGSVGElement>) => {
     if (!zoomMode) {
       return;
     }
 
     event.preventDefault();
-    zoomAt(
+    scheduleZoomAt(
       event.clientX,
       event.clientY,
       event.deltaY < 0 ? 1.18 : 0.85
@@ -1785,8 +2080,9 @@ function NetworkGraph({
     });
   };
 
-  const handlePointerMove = (
-    event: PointerEvent<SVGSVGElement>
+  const applyDragMove = (
+    clientX: number,
+    clientY: number
   ) => {
     const drag = dragRef.current;
 
@@ -1794,10 +2090,7 @@ function NetworkGraph({
       return;
     }
 
-    const point = screenToGraphPoint(
-      event.clientX,
-      event.clientY
-    );
+    const point = screenToGraphPoint(clientX, clientY);
 
     if (!point) {
       return;
@@ -1850,12 +2143,55 @@ function NetworkGraph({
       });
   };
 
+  const flushDragMove = () => {
+    if (dragMoveFrame.current !== undefined) {
+      cancelAnimationFrame(dragMoveFrame.current);
+      dragMoveFrame.current = undefined;
+    }
+
+    const pending = pendingDragPoint.current;
+    pendingDragPoint.current = undefined;
+
+    if (pending) {
+      applyDragMove(pending.clientX, pending.clientY);
+    }
+  };
+
+  const handlePointerMove = (
+    event: PointerEvent<SVGSVGElement>
+  ) => {
+    if (!dragRef.current) {
+      return;
+    }
+
+    pendingDragPoint.current = {
+      clientX: event.clientX,
+      clientY: event.clientY,
+    };
+
+    if (dragMoveFrame.current !== undefined) {
+      return;
+    }
+
+    dragMoveFrame.current = requestAnimationFrame(() => {
+      dragMoveFrame.current = undefined;
+      const pending = pendingDragPoint.current;
+      pendingDragPoint.current = undefined;
+
+      if (pending) {
+        applyDragMove(pending.clientX, pending.clientY);
+      }
+    });
+  };
+
   const handlePointerUp = () => {
     const drag = dragRef.current;
 
     if (!drag) {
       return;
     }
+
+    flushDragMove();
 
     if (drag.moved && drag.position) {
       commitCustomPosition(drag.id, drag.position);
@@ -1865,7 +2201,61 @@ function NetworkGraph({
     nodeRefs.current.get(drag.id)?.classList.remove('dragging');
     dragRef.current = undefined;
     dragSpatialHashRef.current = undefined;
+    pendingDragPoint.current = undefined;
   };
+
+  const handleNodeClick = (
+    event: MouseEvent<SVGGElement>,
+    id: string
+  ) => {
+    if (zoomMode) {
+      event.stopPropagation();
+      return;
+    }
+
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false;
+      return;
+    }
+
+    if (!intro) {
+      onSelect(id);
+    }
+  };
+
+  const pointerDownHandlerRef = useRef(handlePointerDown);
+  pointerDownHandlerRef.current = handlePointerDown;
+
+  const hoverHandlerRef = useRef(setHoveredNode);
+  hoverHandlerRef.current = setHoveredNode;
+
+  const clickHandlerRef = useRef(handleNodeClick);
+  clickHandlerRef.current = handleNodeClick;
+
+  const selectHandlerRef = useRef(onSelect);
+  selectHandlerRef.current = onSelect;
+
+  const handleNodePointerDown = useCallback(
+    (event: PointerEvent<SVGGElement>, id: string) =>
+      pointerDownHandlerRef.current(event, id),
+    []
+  );
+
+  const handleNodeHover = useCallback(
+    (id?: string) => hoverHandlerRef.current(id),
+    []
+  );
+
+  const handleNodeClickStable = useCallback(
+    (event: MouseEvent<SVGGElement>, id: string) =>
+      clickHandlerRef.current(event, id),
+    []
+  );
+
+  const handleNodeSelect = useCallback(
+    (id: string) => selectHandlerRef.current(id),
+    []
+  );
 
   /*
    * Vecinos del nodo seleccionado.
@@ -1896,6 +2286,7 @@ function NetworkGraph({
       className={`graph-wrap ${introProgressClass}`}
     >
       <div
+        ref={graphStageRef}
         className={`graph-stage ${zoomMode ? 'zoom-mode' : ''} ${
           zoomMode && zoomDirection === 'out'
             ? 'zoom-out-mode'
@@ -1985,19 +2376,27 @@ function NetworkGraph({
 
         {/* SVG */}
 
-        <svg
-          ref={svgRef}
-          className="graph"
-          viewBox={`${viewBoxRef.current.x} ${viewBoxRef.current.y} ${viewBoxRef.current.width} ${viewBoxRef.current.height}`}
-          role="img"
-          aria-label="Mapa interactivo de relaciones"
-          preserveAspectRatio="xMidYMid meet"
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
-          onPointerCancel={handlePointerUp}
-          onWheel={handleWheel}
-          onClick={handleZoomClick}
+        <div
+          ref={graphCanvasViewportRef}
+          className="graph-canvas-viewport"
         >
+          <div
+            ref={graphCanvasLayerRef}
+            className="graph-canvas-layer"
+          >
+            <svg
+              ref={svgRef}
+              className="graph"
+              viewBox={`${viewBoxRef.current.x} ${viewBoxRef.current.y} ${viewBoxRef.current.width} ${viewBoxRef.current.height}`}
+              role="img"
+              aria-label="Mapa interactivo de relaciones"
+              preserveAspectRatio="xMidYMid meet"
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerUp}
+              onPointerCancel={handlePointerUp}
+              onWheel={handleWheel}
+              onClick={handleZoomClick}
+            >
           {/* RELACIONES */}
 
           <g className="network-lines">
@@ -2036,10 +2435,7 @@ function NetworkGraph({
                 const labelPosition = active
                   ? labelPoint(a, b, rel, selectedId)
                   : undefined;
-                const labelWidth = Math.max(
-                  112,
-                  rel.type.length * 7.2 + 24
-                );
+                const labelWidth = relationLabelWidths.get(rel.id) ?? 112;
 
                 return (
                   <GraphEdge
@@ -2090,126 +2486,30 @@ function NetworkGraph({
                   !neighbor;
 
                 return (
-                  <g
-                    ref={getNodeRef(record.id)}
-                    key={
-                      record.id
-                    }
-                    className={`node ${record.type} ${
-                      selected
-                        ? 'selected'
-                        : ''
-                    } ${
-                      neighbor
-                        ? 'neighbor'
-                        : ''
-                    } ${
-                      dim
-                        ? 'dim'
-                        : ''
-                    } ${
-                      intro
-                        ? 'intro-node'
-                        : ''
-                    }`}
-                    transform={`translate(${p.x},${p.y})`}
-                    role="button"
-                    tabIndex={
-                      intro
-                        ? -1
-                        : 0
-                    }
-                    onPointerDown={(event) =>
-                      handlePointerDown(
-                        event,
-                        record.id
-                      )
-                    }
-                    aria-label={`${record.name}, ${record.type}, ${connectionCount} ${connectionCount === 1 ? 'conexión' : 'conexiones'}`}
-                    onMouseEnter={() =>
-                      !intro &&
-                      setHoveredNode(
-                        record.id
-                      )
-                    }
-                    onMouseLeave={() =>
-                      setHoveredNode(
-                        undefined
-                      )
-                    }
-                    onFocus={() =>
-                      !intro &&
-                      setHoveredNode(
-                        record.id
-                      )
-                    }
-                    onBlur={() =>
-                      setHoveredNode(
-                        undefined
-                      )
-                    }
-                    onClick={(event) => {
-                      if (zoomMode) {
-                        event.stopPropagation();
-                        return;
-                      }
+                  <GraphNode
+                    key={record.id}
+                    record={record}
+                    point={p}
+                    connectionCount={connectionCount}
+                    coreRadius={sizes.core}
+                    selected={selected}
+                    neighbor={neighbor}
+                    dim={dim}
+                    intro={intro}
+                    nodeRef={getNodeRef(record.id)}
+                    onPointerDown={handleNodePointerDown}
+                    onHover={handleNodeHover}
+                    onClick={handleNodeClickStable}
+                    onSelect={handleNodeSelect}
+                  />
 
-                      if (suppressClickRef.current) {
-                        suppressClickRef.current = false;
-                        return;
-                      }
-
-                      if (!intro) {
-                        onSelect(record.id);
-                      }
-                    }}
-                    onKeyDown={(
-                      e
-                    ) => {
-                      if (
-                        !intro &&
-                        (e.key ===
-                          'Enter' ||
-                          e.key ===
-                            ' ')
-                      ) {
-                        onSelect(
-                          record.id
-                        );
-                      }
-                    }}
-                  >
-
-                    {/* NÚCLEO */}
-
-                    <circle
-                      className="node-core"
-                      r={
-                        selected
-                          ? 8
-                          : neighbor
-                            ? Math.max(5.5, sizes.core)
-                            : intro
-                              ? 4
-                              : sizes.core
-                      }
-                    />
-
-                    {/* NOMBRE */}
-
-                    <text
-                      className="node-name"
-                      pointerEvents="none"
-                      y={sizes.core + 15}
-                    >
-                      {record.name}
-                    </text>
-                  </g>
                 );
               }
             )}
           </g>
-        </svg>
+            </svg>
+          </div>
+        </div>
 
         {/* AYUDA */}
 

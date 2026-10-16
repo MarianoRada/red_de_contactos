@@ -1683,10 +1683,25 @@ button {
   position: absolute;
   top: 0;
   bottom: 0;
-  left: var(--left-space);
-  right: var(--right-space);
+  left: 0;
+  right: 0;
   overflow: hidden;
-  transition: left .32s ease, right .32s ease;
+  transition: none;
+}
+
+.graph-canvas-viewport {
+  position: absolute;
+  inset: 0;
+  will-change: clip-path;
+  transition: clip-path .32s ease;
+}
+
+.graph-canvas-layer {
+  position: absolute;
+  inset: 0;
+  transform-origin: center center;
+  will-change: transform;
+  transition: transform .32s ease;
 }
 
 .graph-stage .graph {
@@ -1703,18 +1718,21 @@ button {
 .graph-stage .graph-title,
 .graph-stage .legend,
 .graph-stage .graph-hint {
-  left: 50%;
-  transition: none;
+  left: calc((100% + var(--left-space) - var(--right-space)) / 2);
+  transition: left .32s ease;
 }
 
 .graph-stage .graph-title {
-  width: min(620px, calc(100% - 40px));
+  width: min(
+    620px,
+    calc(100% - var(--left-space) - var(--right-space) - 40px)
+  );
 }
 
 .info-tool {
   position: absolute;
   top: 22px;
-  left: 24px;
+  left: calc(var(--left-space) + 24px);
   z-index: 4;
   width: 38px;
   height: 38px;
@@ -1725,7 +1743,7 @@ button {
   background: #101419cc;
   color: #8c98a3;
   backdrop-filter: blur(10px);
-  transition: color .2s, border-color .2s, background .2s;
+  transition: left .32s ease, color .2s, border-color .2s, background .2s;
 }
 
 .info-tool:hover {
@@ -1737,11 +1755,12 @@ button {
 .zoom-controls {
   position: absolute;
   top: 22px;
-  right: 24px;
+  right: calc(var(--right-space) + 24px);
   z-index: 4;
   display: flex;
   flex-direction: column;
   gap: 7px;
+  transition: right .32s ease;
 }
 
 .zoom-tool {
