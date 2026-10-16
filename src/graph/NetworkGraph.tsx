@@ -31,6 +31,67 @@ type P = {
   y: number;
 };
 
+type RelationDebugSnapshot = {
+  graphWrap: {
+    className: string;
+    dataIntroFinished: string | null;
+  };
+  svg: {
+    viewBox: string | null;
+    rect: {
+      width: number;
+      height: number;
+    };
+    computed: Record<string, string>;
+  };
+  networkLines: {
+    lineCount: number;
+    edgeGroupCount: number;
+    invalidCoordinateCount: number;
+    zeroLengthCount: number;
+    computed: Record<string, string>;
+    sample: Array<Record<string, string | number>>;
+  };
+  ancestors: {
+    viewport: Record<string, string> | null;
+    layer: Record<string, string> | null;
+  };
+};
+
+type RelationDebugApi = {
+  inspect: (sampleSize?: number) => RelationDebugSnapshot | { error: string };
+  forceVisible: () => RelationDebugSnapshot | { error: string };
+  restore: () => RelationDebugSnapshot | { error: string };
+  timeline: () => IntroDebugTimeline;
+  resetTimeline: () => IntroDebugTimeline;
+  setIsolation: (mode: IntroDebugIsolation) => IntroDebugIsolation;
+  replayIntro: () => void;
+};
+
+type IntroDebugIsolation =
+  | 'none'
+  | 'growth'
+  | 'relations'
+  | 'both';
+
+type IntroDebugEvent = {
+  name: string;
+  at: number;
+  elapsed: number;
+  detail?: Record<string, number | string | boolean | null>;
+};
+
+type IntroDebugTimeline = {
+  runStartedAt: number;
+  events: IntroDebugEvent[];
+};
+
+declare global {
+  interface Window {
+    __redContactosGraphDebug?: RelationDebugApi;
+  }
+}
+
 type IntroAnimationNode = {
   id: string;
   from: P;
@@ -1196,8 +1257,11 @@ function NetworkGraph({
     setIntro,
   ] =
     useState(true);
+  const [debugIntroRequest, setDebugIntroRequest] = useState(0);
 
   const svgRef = useRef<SVGSVGElement>(null);
+  const graphWrapRef = useRef<HTMLElement>(null);
+  const networkLinesRef = useRef<SVGGElement>(null);
   const graphStageRef = useRef<HTMLDivElement>(null);
   const graphCanvasViewportRef = useRef<HTMLDivElement>(null);
   const graphCanvasLayerRef = useRef<HTMLDivElement>(null);
@@ -1285,7 +1349,16 @@ function NetworkGraph({
   const dragMoveFrame = useRef<number>();
   const pendingDragPoint = useRef<PendingDragPoint>();
   const introRunRef = useRef(0);
-  const lastIntroRequestRef = useRef(graphIntroRequest);
+  const lastIntroRequestRef = useRef(
+    `${graphIntroRequest}:0`
+  );
+  const debugIsolationRef = useRef<IntroDebugIsolation>('none');
+  const debugTimelineRef = useRef<IntroDebugTimeline>({
+    runStartedAt: performance.now(),
+    events: [],
+  });
+  const debugTimersRef = useRef<number[]>([]);
+  const debugFrameRef = useRef<number>();
   const nodeRefs = useRef<Map<string, SVGGElement>>(new Map());
   const edgeRefs = useRef<Map<string, SVGLineElement>>(new Map());
   const nodeRefCallbacks = useRef<
@@ -1294,6 +1367,303 @@ function NetworkGraph({
   const edgeRefCallbacks = useRef<
     Map<string, (element: SVGLineElement | null) => void>
   >(new Map());
+  const introRequestKey = `${graphIntroRequest}:${debugIntroRequest}`;
+
+  const clearDebugSampling = () => {
+    debugTimersRef.current.forEach((timer) => {
+      window.clearTimeout(timer);
+    });
+    debugTimersRef.current = [];
+
+    if (debugFrameRef.current !== undefined) {
+      cancelAnimationFrame(debugFrameRef.current);
+      debugFrameRef.current = undefined;
+    }
+  };
+
+  const resetDebugTimeline = () => {
+    clearDebugSampling();
+    debugTimelineRef.current = {
+      runStartedAt: performance.now(),
+      events: [],
+    };
+    return debugTimelineRef.current;
+  };
+
+  const recordDebugEvent = (
+    name: string,
+    detail?: Record<string, number | string | boolean | null>
+  ) => {
+    if (!import.meta.env.DEV) {
+      return;
+    }
+
+    const at = performance.now();
+    const timeline = debugTimelineRef.current;
+
+    timeline.events.push({
+      name,
+      at,
+      elapsed: at - timeline.runStartedAt,
+      detail,
+    });
+  };
+
+  const sampleDebugFrames = () => {
+    if (!import.meta.env.DEV) {
+      return;
+    }
+
+    let previous = performance.now();
+    let remaining = 12;
+
+    const sample = (now: number) => {
+      recordDebugEvent('final-frame-sample', {
+        frameMs: now - previous,
+      });
+      previous = now;
+      remaining -= 1;
+
+      if (remaining > 0) {
+        debugFrameRef.current = requestAnimationFrame(sample);
+      } else {
+        debugFrameRef.current = undefined;
+      }
+    };
+
+    debugFrameRef.current = requestAnimationFrame(sample);
+  };
+
+  const scheduleGrowthSamples = (core: SVGCircleElement) => {
+    if (!import.meta.env.DEV) {
+      return;
+    }
+
+    [0, 500, 1000, 1500, INTRO_GROWTH_MS].forEach((delay) => {
+      const timer = window.setTimeout(() => {
+        const style = getComputedStyle(core);
+        const inlineScale = Number.parseFloat(
+          core.style.transform.match(
+            /^scale\(([-+]?\d*\.?\d+)/
+          )?.[1] ?? ''
+        );
+
+        recordDebugEvent('growth-sample', {
+          delayMs: delay,
+          inlineScale: Number.isFinite(inlineScale)
+            ? inlineScale
+            : null,
+          inlineTransform: core.style.transform,
+          computedTransform: style.transform,
+        });
+      }, delay);
+
+      debugTimersRef.current.push(timer);
+    });
+  };
+
+  const scheduleRelationSamples = () => {
+    if (!import.meta.env.DEV) {
+      return;
+    }
+
+    [0, 100, 250, 400].forEach((delay) => {
+      const timer = window.setTimeout(() => {
+        const networkLines = networkLinesRef.current;
+
+        if (!networkLines) {
+          return;
+        }
+
+        recordDebugEvent('relations-sample', {
+          delayMs: delay,
+          computedOpacity: getComputedStyle(networkLines).opacity,
+        });
+      }, delay);
+
+      debugTimersRef.current.push(timer);
+    });
+  };
+
+  useEffect(() => {
+    if (!import.meta.env.DEV) {
+      return;
+    }
+
+    const readComputed = (
+      element: Element | null
+    ): Record<string, string> | null => {
+      if (!element) {
+        return null;
+      }
+
+      const style = getComputedStyle(element);
+
+      return {
+        display: style.display,
+        visibility: style.visibility,
+        opacity: style.opacity,
+        pointerEvents: style.pointerEvents,
+        stroke: style.stroke,
+        strokeOpacity: style.strokeOpacity,
+        strokeWidth: style.strokeWidth,
+        filter: style.filter,
+        transform: style.transform,
+        clipPath: style.clipPath,
+      };
+    };
+
+    const inspect = (
+      requestedSampleSize = 5
+    ): RelationDebugSnapshot | { error: string } => {
+      const graphWrap = graphWrapRef.current;
+      const svg = svgRef.current;
+      const networkLines = networkLinesRef.current;
+
+      if (!graphWrap || !svg || !networkLines) {
+        return {
+          error: 'El grafo todavía no está montado en el DOM.',
+        };
+      }
+
+      const sampleSize = Math.max(
+        1,
+        Math.min(Math.floor(requestedSampleSize), 20)
+      );
+      const lineElements = Array.from(
+        networkLines.querySelectorAll('line')
+      );
+      const lineData = lineElements.map((line) => {
+        const x1 = Number.parseFloat(line.getAttribute('x1') ?? '');
+        const y1 = Number.parseFloat(line.getAttribute('y1') ?? '');
+        const x2 = Number.parseFloat(line.getAttribute('x2') ?? '');
+        const y2 = Number.parseFloat(line.getAttribute('y2') ?? '');
+
+        return {
+          line,
+          x1,
+          y1,
+          x2,
+          y2,
+        };
+      });
+      const validLineData = lineData.filter(
+        ({ x1, y1, x2, y2 }) =>
+          [x1, y1, x2, y2].every(Number.isFinite)
+      );
+
+      return {
+        graphWrap: {
+          className: graphWrap.className,
+          dataIntroFinished: graphWrap.getAttribute(
+            'data-intro-finished'
+          ),
+        },
+        svg: {
+          viewBox: svg.getAttribute('viewBox'),
+          rect: {
+            width: svg.getBoundingClientRect().width,
+            height: svg.getBoundingClientRect().height,
+          },
+          computed: readComputed(svg) ?? {},
+        },
+        networkLines: {
+          lineCount: lineElements.length,
+          edgeGroupCount: networkLines.querySelectorAll('g.edge').length,
+          invalidCoordinateCount:
+            lineData.length - validLineData.length,
+          zeroLengthCount: validLineData.filter(
+            ({ x1, y1, x2, y2 }) => x1 === x2 && y1 === y2
+          ).length,
+          computed: readComputed(networkLines) ?? {},
+          sample: lineData.slice(0, sampleSize).map(
+            ({ line, x1, y1, x2, y2 }) => ({
+              x1,
+              y1,
+              x2,
+              y2,
+              stroke: getComputedStyle(line).stroke,
+              strokeOpacity: getComputedStyle(line).strokeOpacity,
+              opacity: getComputedStyle(line).opacity,
+            })
+          ),
+        },
+        ancestors: {
+          viewport: readComputed(graphCanvasViewportRef.current),
+          layer: readComputed(graphCanvasLayerRef.current),
+        },
+      };
+    };
+
+    let forcedStyle:
+      | { opacity: string; transition: string }
+      | undefined;
+
+    const api: RelationDebugApi = {
+      inspect,
+      forceVisible: () => {
+        const networkLines = networkLinesRef.current;
+
+        if (!networkLines) {
+          return {
+            error: 'El grupo de relaciones todavía no está montado.',
+          };
+        }
+
+        forcedStyle ??= {
+          opacity: networkLines.style.opacity,
+          transition: networkLines.style.transition,
+        };
+        networkLines.style.transition = 'none';
+        networkLines.style.opacity = '1';
+
+        return inspect();
+      },
+      restore: () => {
+        const networkLines = networkLinesRef.current;
+
+        if (networkLines && forcedStyle) {
+          networkLines.style.opacity = forcedStyle.opacity;
+          networkLines.style.transition = forcedStyle.transition;
+        }
+
+        forcedStyle = undefined;
+        return inspect();
+      },
+      timeline: () => ({
+        runStartedAt: debugTimelineRef.current.runStartedAt,
+        events: [...debugTimelineRef.current.events],
+      }),
+      resetTimeline: () => resetDebugTimeline(),
+      setIsolation: (mode) => {
+        debugIsolationRef.current = mode;
+        resetDebugTimeline();
+        setDebugIntroRequest((request) => request + 1);
+        return mode;
+      },
+      replayIntro: () => {
+        resetDebugTimeline();
+        setDebugIntroRequest((request) => request + 1);
+      },
+    };
+
+    window.__redContactosGraphDebug = api;
+
+    return () => {
+      if (window.__redContactosGraphDebug === api) {
+        delete window.__redContactosGraphDebug;
+      }
+
+      const networkLines = networkLinesRef.current;
+
+      if (networkLines && forcedStyle) {
+        networkLines.style.opacity = forcedStyle.opacity;
+        networkLines.style.transition = forcedStyle.transition;
+      }
+
+      clearDebugSampling();
+    };
+  }, []);
 
   const getNodeRef = (id: string) => {
     const existing = nodeRefCallbacks.current.get(id);
@@ -1452,11 +1822,27 @@ function NetworkGraph({
     let frameId: number | undefined;
     let unlockFrameId: number | undefined;
     let initial = true;
+    let stageSize: { width: number; height: number } | undefined;
+
+    const invalidateStageSize = () => {
+      stageSize = undefined;
+    };
 
     const applyViewportTransform = () => {
       frameId = undefined;
 
-      const stageRect = stage.getBoundingClientRect();
+      const measuredStageSize =
+        stageSize ??
+        (() => {
+          const stageRect = stage.getBoundingClientRect();
+          return {
+            width: stageRect.width,
+            height: stageRect.height,
+          };
+        })();
+
+      stageSize = measuredStageSize;
+
       const shellStyle = getComputedStyle(shell);
       const leftSpace =
         Number.parseFloat(
@@ -1466,8 +1852,8 @@ function NetworkGraph({
         Number.parseFloat(
           shellStyle.getPropertyValue('--right-space')
         ) || 0;
-      const width = Math.max(stageRect.width, 1);
-      const height = Math.max(stageRect.height, 1);
+      const width = Math.max(measuredStageSize.width, 1);
+      const height = Math.max(measuredStageSize.height, 1);
       const availableWidth = Math.max(
         width - leftSpace - rightSpace,
         1
@@ -1482,6 +1868,19 @@ function NetworkGraph({
       );
       const relativeScale = targetScale / Math.max(fullScale, 0.0001);
       const shiftX = (leftSpace - rightSpace) / 2;
+
+      graphStageRef.current?.style.setProperty(
+        '--graph-shift-x',
+        `${shiftX}px`
+      );
+      graphStageRef.current?.style.setProperty(
+        '--graph-left-space',
+        `${leftSpace}px`
+      );
+      graphStageRef.current?.style.setProperty(
+        '--graph-right-space',
+        `${rightSpace}px`
+      );
 
       if (initial) {
         canvasLayer.style.transition = 'none';
@@ -1515,10 +1914,22 @@ function NetworkGraph({
       frameId = requestAnimationFrame(applyViewportTransform);
     };
 
+    const applyPanelViewportTransform = () => {
+      if (frameId !== undefined) {
+        cancelAnimationFrame(frameId);
+        frameId = undefined;
+      }
+
+      // Las clases del panel ya cambiaron. Aplicar el objetivo ahora permite
+      // que el panel y el grafo empiecen la misma transición, sin esperar al
+      // siguiente frame.
+      applyViewportTransform();
+    };
+
     applyViewportTransform();
 
     const mutationObserver = new MutationObserver(
-      scheduleViewportTransform
+      applyPanelViewportTransform
     );
     mutationObserver.observe(shell, {
       attributes: true,
@@ -1528,15 +1939,31 @@ function NetworkGraph({
     const resizeObserver =
       typeof ResizeObserver === 'undefined'
         ? undefined
-        : new ResizeObserver(scheduleViewportTransform);
+        : new ResizeObserver((entries) => {
+            const entry = entries[0];
+
+            if (entry) {
+              stageSize = {
+                width: entry.contentRect.width,
+                height: entry.contentRect.height,
+              };
+            }
+
+            scheduleViewportTransform();
+          });
 
     resizeObserver?.observe(stage);
-    window.addEventListener('resize', scheduleViewportTransform);
+    const handleWindowResize = () => {
+      invalidateStageSize();
+      scheduleViewportTransform();
+    };
+
+    window.addEventListener('resize', handleWindowResize);
 
     return () => {
       mutationObserver.disconnect();
       resizeObserver?.disconnect();
-      window.removeEventListener('resize', scheduleViewportTransform);
+      window.removeEventListener('resize', handleWindowResize);
 
       if (frameId !== undefined) {
         cancelAnimationFrame(frameId);
@@ -1554,15 +1981,23 @@ function NetworkGraph({
    * ============================================================
    */
   useLayoutEffect(() => {
-    if (lastIntroRequestRef.current === graphIntroRequest) {
+    if (lastIntroRequestRef.current === introRequestKey) {
       return;
     }
 
-    lastIntroRequestRef.current = graphIntroRequest;
+    lastIntroRequestRef.current = introRequestKey;
+    graphWrapRef.current?.removeAttribute('data-intro-finished');
+    networkLinesRef.current?.style.removeProperty('opacity');
     setIntro(true);
-  }, [graphIntroRequest]);
+  }, [introRequestKey]);
 
   useEffect(() => {
+    resetDebugTimeline();
+    recordDebugEvent('intro-start', {
+      nodes: records.length,
+      relationships: relationships.length,
+    });
+
     const runId = ++introRunRef.current;
 
     if (frame.current !== undefined) {
@@ -1652,6 +2087,7 @@ function NetworkGraph({
       } else {
         if (introRunRef.current === runId) {
           frame.current = undefined;
+          recordDebugEvent('movement-end');
           setIntro(false);
         }
       }
@@ -1674,7 +2110,7 @@ function NetworkGraph({
     // The animation intentionally starts only when the intro request changes.
     // Its current node data is captured from that render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [graphIntroRequest]);
+  }, [introRequestKey]);
 
   /*
    * El layout final ya contiene el radio real de cada núcleo. Para evitar que
@@ -1691,6 +2127,43 @@ function NetworkGraph({
         node.querySelector<SVGCircleElement>('.node-core')
       )
       .filter((core): core is SVGCircleElement => core !== null);
+    const isolation = debugIsolationRef.current;
+    const disableGrowth =
+      isolation === 'growth' || isolation === 'both';
+    const disableRelations =
+      isolation === 'relations' || isolation === 'both';
+    let growthFrame: number | undefined;
+    let growthEndCore: SVGCircleElement | undefined;
+    let growthEndHandler:
+      | ((event: TransitionEvent) => void)
+      | undefined;
+
+    const revealRelations = () => {
+      if (disableRelations) {
+        recordDebugEvent('relations-disabled');
+        return;
+      }
+
+      const networkLines = networkLinesRef.current;
+
+      if (!networkLines) {
+        return;
+      }
+
+      networkLines.style.setProperty('opacity', '1');
+      graphWrapRef.current?.setAttribute(
+        'data-intro-finished',
+        'true'
+      );
+      recordDebugEvent('relations-start');
+      scheduleRelationSamples();
+      sampleDebugFrames();
+    };
+
+    recordDebugEvent('geometry-ready', {
+      nodes: cores.length,
+      isolation,
+    });
 
     cores.forEach((core) => {
       const finalRadius = Number(core.getAttribute('r')) || INTRO_CORE_RADIUS;
@@ -1699,11 +2172,14 @@ function NetworkGraph({
         INTRO_CORE_RADIUS / finalRadius
       );
 
-      core.style.transformBox = 'fill-box';
-      core.style.transformOrigin = 'center';
       core.style.transition = 'none';
       core.style.transform = `scale(${initialScale})`;
     });
+
+    if (cores.length === 0) {
+      revealRelations();
+      return;
+    }
 
     // Flush the initial state once for the whole collection instead of
     // forcing a layout read after every individual style write.
@@ -1715,13 +2191,70 @@ function NetworkGraph({
       core.style.transition = `transform ${INTRO_GROWTH_MS}ms ease-in-out`;
     });
 
-    const growthFrame = requestAnimationFrame(() => {
-      cores.forEach((core) => {
-        core.style.transform = 'scale(1)';
+    if (!disableGrowth) {
+      growthEndCore = cores.find(
+        (core) =>
+          (Number(core.getAttribute('r')) || INTRO_CORE_RADIUS) >
+          INTRO_CORE_RADIUS
+      );
+    }
+
+    if (growthEndCore) {
+      growthEndHandler = (event: TransitionEvent) => {
+        if (event.propertyName === 'transform') {
+          recordDebugEvent('growth-end', {
+            elapsedTime: event.elapsedTime * 1000,
+          });
+          revealRelations();
+        }
+      };
+      growthEndCore.addEventListener(
+        'transitionend',
+        growthEndHandler
+      );
+    }
+
+    growthFrame = requestAnimationFrame(() => {
+      growthFrame = undefined;
+
+      recordDebugEvent('growth-start', {
+        disabled: disableGrowth,
       });
+      scheduleGrowthSamples(cores[0]);
+
+      if (!disableGrowth) {
+        cores.forEach((core) => {
+          core.style.transform = 'scale(1)';
+        });
+      }
+
+      // Dejar que el frame de inicio del crecimiento se pinte antes de
+      // habilitar la transición de opacidad de toda la capa de relaciones.
+      if (disableGrowth) {
+        recordDebugEvent('growth-disabled');
+        revealRelations();
+      } else if (!growthEndCore) {
+        recordDebugEvent('growth-end', {
+          skipped: true,
+        });
+        revealRelations();
+      }
     });
 
-    return () => cancelAnimationFrame(growthFrame);
+    return () => {
+      if (growthFrame !== undefined) {
+        cancelAnimationFrame(growthFrame);
+      }
+
+      if (growthEndCore && growthEndHandler) {
+        growthEndCore.removeEventListener(
+          'transitionend',
+          growthEndHandler
+        );
+      }
+
+      clearDebugSampling();
+    };
   }, [intro]);
 
   const pos =
@@ -2305,7 +2838,7 @@ function NetworkGraph({
   const introProgressClass =
     intro
       ? 'intro-running'
-      : 'intro-finished';
+      : 'intro-geometry-ready';
 
   /*
    * ============================================================
@@ -2314,6 +2847,7 @@ function NetworkGraph({
    */
   return (
     <section
+      ref={graphWrapRef}
       className={`graph-wrap ${introProgressClass}`}
     >
       <div
@@ -2430,7 +2964,10 @@ function NetworkGraph({
             >
           {/* RELACIONES */}
 
-          <g className="network-lines">
+          <g
+            ref={networkLinesRef}
+            className="network-lines"
+          >
             {relationships.map(
               (rel) => {
                 const a =

@@ -1718,8 +1718,11 @@ button {
 .graph-stage .graph-title,
 .graph-stage .legend,
 .graph-stage .graph-hint {
-  left: calc((100% + var(--left-space) - var(--right-space)) / 2);
-  transition: left .32s ease;
+  left: 50%;
+  transform: translateX(
+    calc(-50% + var(--graph-shift-x, 0px))
+  );
+  transition: transform .32s ease;
 }
 
 .graph-stage .graph-title {
@@ -1746,6 +1749,12 @@ button {
   transition: left .32s ease, color .2s, border-color .2s, background .2s;
 }
 
+.graph-stage .info-tool {
+  left: 24px;
+  transform: translateX(var(--graph-left-space, 0px));
+  transition: transform .32s ease, color .2s, border-color .2s, background .2s;
+}
+
 .info-tool:hover {
   border-color: #6f7f8d;
   background: #1a222bcc;
@@ -1761,6 +1770,12 @@ button {
   flex-direction: column;
   gap: 7px;
   transition: right .32s ease;
+}
+
+.graph-stage .zoom-controls {
+  right: 24px;
+  transform: translateX(calc(-1 * var(--graph-right-space, 0px)));
+  transition: transform .32s ease;
 }
 
 .zoom-tool {
@@ -1907,14 +1922,17 @@ button {
   filter: none;
 }
 
-.intro-running .network-lines {
+.network-lines {
   opacity: 0;
+}
+
+.intro-running .network-lines,
+.intro-geometry-ready .network-lines {
   pointer-events: none;
 }
 
-.intro-finished .network-lines {
-  opacity: 1;
-  transition: opacity .35s ease-out;
+.graph-wrap[data-intro-finished='true'] .network-lines {
+  pointer-events: auto;
 }
 
 .intro-running .node.intro-node {
